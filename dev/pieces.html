@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pieces harness</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #5d564c; color: #f3ece0; overflow: hidden;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #info { position: fixed; left: 12px; top: 12px; padding: 8px 10px; border-radius: 8px;
+    background: rgba(28, 24, 20, .6); white-space: pre; pointer-events: none; }
+  #check { position: fixed; inset: 0; display: none; place-items: center; gap: 12px;
+    grid-auto-flow: column; background: #111; }
+  #check figure { margin: 0; text-align: center; }
+  #check canvas { width: 384px; height: 384px; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">loading…</div>
+<div id="check"></div>
+<!--
+  Dev harness for scene/pieces.js + anim/schedule.js, independent of the app's renderer/bed.
+  Query params:
+    ?t=<s>           start the clock at t seconds      ?pause=1     freeze the clock
+    ?view=auto|low|top|gold|close                            ?n=<count>   synthetic piece count (default 12000)
+    ?sunAz=<deg>&sunEl=<deg>  fixed sun direction       ?ripple=<x>  glaze ripple strength
+    ?goldShare=<0..1> share of gold pieces (default 0.10)
+    ?check=pose      GPU pose vs the prototype's CPU pose, pixel by pixel
+  Hooks: window.__seek(t), __pause(bool), __fps, __stats, __bench(frames), __sun(azDeg, elDeg), __poseCheck()
+-->
+<script type="module" src="./pieces.js"></script>
+</body>
+</html>

@@ -14,10 +14,11 @@ Contents
 4. [The GPU side](#4-the-gpu-side)
 5. [Porting the prototype from three r128 to r186](#5-porting-the-prototype-from-three-r128-to-r186)
 6. [Trade-offs and alternatives considered](#6-trade-offs-and-alternatives-considered)
-7. [Testing and verification](#7-testing-and-verification)
-8. [Status, open questions and limits](#8-status-open-questions-and-limits)
-9. [Glossary](#9-glossary)
-10. [Ten likely interview questions](#10-ten-likely-interview-questions)
+7. [Video export](#7-video-export)
+8. [Testing and verification](#8-testing-and-verification)
+9. [Status, open questions and limits](#9-status-open-questions-and-limits)
+10. [Glossary](#10-glossary)
+11. [Thirteen likely interview questions](#11-thirteen-likely-interview-questions)
 
 ---
 
@@ -43,9 +44,10 @@ What you see, in order:
    later the sun makes one 11-second orbit around the panel, and the gold pieces glint.
 
 The HUD shows a counter, the name of the stage being laid ("Petal kites", "Bows", "Eight-point
-stars", ...), a progress bar, and buttons: Replay, Speed (1×, 2×, 4×, 8×), Finish, Sweep light and
-Sound. One finger or the mouse turns the view, the wheel or a two-finger pinch zooms, and a
-double-click puts the camera back on its automatic path.
+stars", ...), a progress bar, and buttons: Replay, Speed (1×, 2×, 4×, 8×), Finish, Sweep light,
+Sound and Export video (which renders the whole piece into an MP4 file, section 7). One finger or
+the mouse turns the view, the wheel or a two-finger pinch zooms, and a double-click puts the camera
+back on its automatic path.
 
 **Where it came from.** The project started as a single-file prototype (`reference/prototype.html`,
 three.js r128, about 450 lines). It laid square tiles and coloured each one by asking "what colour
@@ -119,8 +121,15 @@ where the piece is. So nothing on the CPU has to remember or update per-piece st
 | `src/anim/light.js` | the sun, the light sweep, the shadow box |
 | `src/ui/hud.js` | the HUD and the area-weighted stage label |
 | `src/audio/clicks.js` | landing clicks, synthesised with WebAudio |
+| `src/export/plan.js` | video export: the timeline, frame counts, sizes, quality settings, the encoder fallback chain (pure, tested in Node) |
+| `src/export/record.js` | video export: renders frame by frame and encodes with WebCodecs, or falls back to `MediaRecorder` |
+| `src/export/audio.js` | video export: the click track, rendered offline from the schedule |
+| `src/export/overlay.js` | video export: the burned-in title and counter, and where they go |
+| `src/export/mp4.js` | video export: a byte-level fix-up of the finished MP4 for Apple's players |
+| `src/export/mediabunny.js` | the parts of the mediabunny muxing library the export uses, loaded on demand |
+| `src/ui/export-panel.js`, `eta.js` | the Export video panel, and its "time left" estimate |
 | `src/legacy/` | the prototype's square tesserae, ported unchanged |
-| `src/main.js` | boot, startup order, the frame loop, button wiring |
+| `src/main.js` | boot, startup order, the frame loop (`step` and `frame`), button wiring, export mode |
 
 Two conventions run through all of it:
 
@@ -505,7 +514,8 @@ so three.js never culls a piece that is mid-air above the edge of the view.
 
 ### 4.6 Why the CPU cost per frame is constant
 
-Here is everything `main.js` does per frame (`frame()`), and what each costs:
+Here is everything `main.js` does per frame (`step()`, which the live loop `frame()` calls once per
+display frame), and what each costs:
 
 | Work | Cost |
 |---|---|
@@ -558,10 +568,13 @@ viewer:
 - Behind the panel, where its reflection could reach the camera, it must avoid the **glaze's** mirror
   angle. The glaze is satin (broad reflection lobe), so wherever the sun comes near a point's mirror
   direction, the glaze there washes out to pastel, as much as the gold glints. Every point on screen
-  has its own mirror height (lowest at the far edge, highest at the near edge), so the sun keeps 0.4
-  rad (about 23°) away from that whole band. Normally it passes *below* the band; for a low view,
+  has its own mirror height (lowest at the far edge, highest at the near edge), so the sun keeps 0.5
+  rad (about 29°) away from that whole band. Normally it passes *below* the band; for a low view,
   where "below" would sink under the prototype's 27° dip, it passes *above* (capped at about 83°).
-  The side is chosen once per sweep, so the sun never jumps.
+  The aim is worked out again on every frame from where the camera is at that moment (after
+  Finish, the sweep starts while the camera is still flying out of the low close-up), and it
+  follows that target through a damped spring, so when the side changes the sun glides there
+  instead of jumping (`light.js`, `AIM_SMOOTH`).
 - The gold still flashes because of its facets: as the sun moves, piece after piece swings through
   its own mirror angle, while the flat glaze stays saturated.
 
@@ -598,6 +611,12 @@ The slab under the bed sits at −0.25 instead of the prototype's −0.01. At �
 bed surface than the depth buffer could tell apart once the camera pulled back, so it flickered
 through the mortar in blocky patches ("z-fighting", in the prototype too).
 
+The same limit showed up once more, found by the video export: far out (a portrait page zoomed out,
+or the vertical video's end view, about 470 units away), the depth buffer could no longer tell piece
+tops from the bed 0.3 below them, and on some frames the bed painted over whole areas of pieces. The
+camera's near clip plane, which sets that precision, now follows its distance instead of staying at
+0.1 (`camera.js`, `NEAR_PER_DISTANCE`; section 7.7 has the numbers).
+
 ### 4.10 Startup (`src/main.js`)
 
 The page shows something at once, then builds:
@@ -624,7 +643,8 @@ says "Could not lay the panel" instead of "Preparing the bed" forever.
 Other robustness: with `prefers-reduced-motion`, the finished panel is shown at once, with no slow
 turn and no automatic sweep. If the browser loses the WebGL context (a phone reclaiming GPU memory)
 and restores it, the reflection environment, which was rendered on the GPU and is simply gone, is
-baked again and handed back to every material. Without WebGL, the page says so and hides the HUD.
+baked again and handed back to every material (a video export in progress waits for this and redraws
+the frame it was on, 7.4). Without WebGL, the page says so and hides the HUD.
 
 ### 4.11 Holding the frame rate
 
@@ -647,7 +667,9 @@ pieces. So the levers are about pixels:
   the depth test and are not shaded (a saving on GPUs that do not already skip hidden pixels; not
   measurable on this Apple GPU).
 
-The brief asks for 60 fps on a mid-range laptop. What was measured and what was not is in section 8.
+The brief asks for 60 fps on a mid-range laptop. What was measured and what was not is in section 9.
+(A video export does not depend on any of this: it renders frame by frame, however long each frame
+takes, section 7.)
 
 ---
 
@@ -688,8 +710,11 @@ camera turn no longer snapping round on Finish and Replay.
 headless Chrome on the real GPU, gives both pages the same fake clock (it replaces
 `requestAnimationFrame` and `performance.now` before any page script runs, stepping exactly 1/60 s),
 and compares screenshots at six checkpoints. The prototype is measured as-is and with the same slab
-fix injected (the reference file itself is not edited). Latest run: mean absolute difference 0.36 to
-0.89 levels out of 255, and 0% of pixels off by more than 24, at every checkpoint. The legacy build
+fix injected (the reference file itself is not edited). Latest run, against the slab-fixed
+prototype: mean absolute difference 0.36 to 0.93 levels out of 255, and at most 0.12% of pixels off
+by more than 24. Before the near-plane change of 7.7 it was 0.36 to 0.89 and 0%: the new
+outliers sit where depth precision matters, the prototype's own depth glitches on piece edges (its
+near plane is still a fixed 0.1), which the port no longer has. The legacy build
 keeps a frozen copy of the prototype's palette (`PROTOTYPE_PAL`) so retuning the zellige colours
 never moves the reference.
 
@@ -786,9 +811,352 @@ instead).
 
 ---
 
-## 7. Testing and verification
+## 7. Video export
 
-**Unit tests** (`npm test`, Node's built-in test runner, 144 tests, about 4 seconds):
+The brief's P1 feature: turn the piece into a video file for Instagram Reels, TikTok or a portfolio.
+Its acceptance check: "Video export produces a smooth file with no dropped frames". Click **Export
+video** in the HUD, pick a format and a speed, press Start, and the page renders the whole piece,
+from the first gold star to the end of the light sweep, into a file you download from the panel.
+
+| | |
+|---|---|
+| Formats | Vertical 1080×1920 (Reels, TikTok), Square 1080×1080, Landscape 1920×1080 (`export/plan.js`, `PRESETS`) |
+| Frame rate | 60 fps, every frame |
+| Speeds | 1×: 3,669 frames, 61.15 s. 2×: 2,246 frames, 37.43 s |
+| Options | the title and counter burned into the picture; Sound (the landing clicks) |
+| File | `rosette-1080x1920-1x.mp4` and so on: MP4 with H.264 (+ AAC sound) where the browser can (7.6) |
+
+```
+ export/record.js, once per video frame
+   main.js step(1/60) ──► WebGL canvas at the video size
+        ──► copied onto a 2D "frame" canvas (also the on-screen preview)
+        ──► title + counter drawn over it (export/overlay.js)
+        ──► mediabunny CanvasSource: VideoFrame ──► WebCodecs encoder ──► MP4 or WebM in memory
+   sound: rendered offline before the first frame (export/audio.js), fed in one-second pieces
+```
+
+### 7.1 Why not just record the screen
+
+The obvious way, and the one the brief suggested, is `canvas.captureStream(60)` with `MediaRecorder`:
+the browser records whatever the canvas shows, in real time. The trouble is that a recording only gets
+the frames the page manages to draw on time, and frames go missing in three ways:
+
+- **The page is late.** A frame that takes longer than 1/60 s to draw (a slower GPU, a garbage
+  collection pause, the moment the outer field lays hundreds of pieces a second) is not there when the
+  recorder looks. The recorder repeats the previous one or skips it, and the video stutters.
+- **The live loop follows the wall clock.** `main.js` advances the piece by the real time since the last
+  frame (`sim += dt × speed`, capped at 0.05 s). That keeps the live page in step with the clock, but it
+  means the animation steps in a recording are as uneven as the machine was.
+- **The recorder has its own clock.** `captureStream(60)` samples the canvas on its own 60 Hz timer,
+  not in step with the page's frames, and throws away a frame drawn a hair early. Measured even on the
+  fast development machine: 23 of 2,246 frames lost that way.
+
+So a recording's smoothness depends on the machine. The way out is to stop working in real time.
+
+### 7.2 The fixed-step render mode
+
+`main.js`'s frame loop is split in two:
+
+- `step(dt)` advances one **playback** of the piece by `dt` seconds and draws it: clocks, pieces,
+  camera, sun, shadow map, render;
+- `frame()` is the live loop: it measures the real time since the last display frame and calls
+  `step()` with it.
+
+A playback is a small object: its two clocks (`sim`, the laying time, and `clock`, the wall clock the
+sweep runs on), its own camera rig and light rig, its speed, and whether its sweep has run yet. The
+page plays one called `live`. An export makes a fresh playback and calls `step(1/60)` once per video
+frame. **The clock is the frame counter**: frame k shows the piece after exactly k + 1 steps of 1/60 s,
+whatever the wall clock did. A fast machine exports quickly and a slow one slowly, and the frames are
+the same.
+
+While a video is being made (`beginExport` and `endExport` in `main.js`):
+
+- the canvas is resized to the video's exact size at one pixel per pixel (`setPixelRatio(1)`);
+- the live loop keeps its `requestAnimationFrame` going but does nothing, so the live playback waits
+  where it was, and the performance governor (4.11) is never consulted (it would change the resolution
+  mid-file);
+- the export's camera takes no mouse or touch input, keeps the slow turn even with reduced motion, and
+  the video always ends with the light sweep;
+- the live clicks and the HUD belong to the live page; the export's sound is made separately (7.5);
+- two things that remember the past start from a known state, so the video does not depend on what
+  the live page was doing: the shadow box (only rebuilt when it moves by more than 0.05) and the far-view
+  slab switch (a two-threshold band, 4.2). Measured before this, by hashing every frame handed to the
+  encoder: exports started from a still, finished page and from a page mid-laying differed in 2,214 of
+  2,246 frames. Since then, an export started mid-sweep from a zoomed, turned, 8× page decodes identical
+  to one started from a fresh page;
+- `endExport` puts everything back: the pixel ratio and size (or, if the window was resized meanwhile,
+  what the resize handler would have given it), the slab detail, the sun and its shadow box and bias.
+  `recordVideo` calls it from a `finally`, so it runs after success, Cancel or failure alike.
+  `scripts/record.mjs` checks it: with reduced motion (the live page is a still), the screenshots before
+  and after an export are pixel-identical.
+
+The timeline of every export (`planExport` in `export/plan.js`):
+
+```
+ 0 ──── laying (T_END / speed) ────┤ 1.2 s pause ├──── light sweep, 11 s ────┤ 1.5 s hold ┤
+```
+
+As in the live app, the laying runs `speed` times faster but the pause and the sweep run on the wall
+clock, so at 2× they keep their real length. The frame count is computed from this plan, not counted
+from the loop, and the checker compares the file against it: one dropped or doubled frame anywhere is a
+failed check, not a slightly odd file.
+
+Determinism has a limit worth knowing. Within one page load the frames come out the same however the
+export starts. Across page loads, the bed's grain texture, drawn by the GPU, can come out one level
+different in a few pixels, and the encoder then writes a different but equally good file. So the
+checks compare frame counts, timing and pixels, never file checksums. (In practice: a vertical 2×
+export with Chrome's CPU slowed 4× and one at full speed, in two separate page loads, came out the same
+to the byte except for the 20 bytes of their creation timestamps.)
+
+### 7.3 Encoding: WebCodecs, muxing and explicit timestamps
+
+Two words first. A **codec** compresses the pictures (H.264, VP9) or the sound (AAC, Opus). A
+**container** (MP4, WebM) is the file format that holds the compressed tracks, plus an index of when
+each frame is shown. Packing the compressed frames into the container is **muxing**.
+
+**WebCodecs** is the browser API that gives a page the (usually hardware) video encoder directly: you
+hand it a frame and its timestamp, it hands back compressed data, and real time does not come into it.
+WebCodecs does not write files, so the muxing is done by **mediabunny** (1.61.0). It is loaded on demand
+(`import('./mediabunny.js')`), so the live page's startup does not carry it, and that module imports
+only the parts used, so the bundler can leave the rest of the library out.
+
+Per frame (`export/record.js`):
+
+1. `step(1/60)` renders into the WebGL canvas at the video size;
+2. the picture is copied onto a 2D "frame" canvas straight away, in the same task, before the browser
+   presents the WebGL canvas and clears it. That frame canvas is also the preview shown on screen;
+3. the title and counter are drawn over it with the 2D canvas API (`export/overlay.js`). The HUD is
+   HTML, not part of the WebGL picture, so it is drawn again in the HUD's fonts and colours, in a
+   smoked-glass pill measured once for the widest count so it never changes size. On the vertical
+   video it sits below the top 10%, clear of the apps' own header, caption area and side buttons;
+4. mediabunny's `CanvasSource` snapshots that canvas as a `VideoFrame` and encodes it:
+   `await video.add(k / 60, 1 / 60)`.
+
+The timestamp is the point: frame k is stamped k/60 s and lasts 1/60 s, whatever the wall clock did.
+The track is also declared as 60 fps, so mediabunny snaps every time onto the 1/60 s grid. Measured in
+an exported vertical 1× MP4: time base 1/60 s, every step exactly one tick, 3,669 frames.
+
+The encoder settings, and why:
+
+- **H.264 High profile, level 4.2** (`avc1.64002a`). 1080 lines at 60 fps is 489,600 macroblocks a
+  second, more than level 4.1 allows; mediabunny's automatic codec string asked for 4.1. ffprobe reads
+  level 42 in Chrome's files.
+- **A key frame every 2 s**: a complete picture that players can seek to.
+- **`latencyMode: 'quality'`**: the encoder may not drop frames to keep up (the `'realtime'` mode may).
+- **A constant quantizer of 22 instead of a bitrate**, where the encoder honours one. Given a bitrate,
+  the hardware H.264 encoder spent a flat ~50 kB on every frame, so the finished panel under the moving
+  sun, where every pixel changes and the detail is finest, got the worst picture. A constant quantizer
+  (like ffmpeg's CRF) spends what each frame needs. 22 was chosen by measuring against the uncompressed
+  frames the encoder received (the table is in `plan.js`): 1.4 dB better in the mosaic than 26, files of
+  170 to 195 MB at 1×, and the busiest second at 42 to 48 Mbit/s, inside level 4.2's limit of 62.5.
+  Quantizer 20 bought only 0.4 dB more for a quarter more bytes.
+- **Checking that the quantizer is real.** Firefox says it supports a quantizer and then ignores it,
+  and its files came out soft at 8 Mbit/s. So `avcQuantizerWorks()` encodes one small frame of fine
+  noise at quantizer 22 and at 40 and compares the sizes (Chrome 57.9 kB against 17.0 kB; Firefox
+  45.9 kB for both). Where that fails, and for Safari (no quantizer mode) and VP9, the export uses a
+  bitrate: 0.3 bits per pixel per frame for H.264 (37.3 Mbit/s at 1080×1920, 21 at 1080×1080), 0.2 for
+  VP9.
+
+The MP4 is written with **fast start**: its index at the front of the file, so a player can start before
+it has all of it. That means the whole file stays in memory until it is finished (mediabunny's
+`BufferTarget`); the panel's Download link is then a blob URL of it.
+
+### 7.4 Backpressure, and a lost GPU
+
+The GPU can draw frames faster than the encoder compresses them. Left alone, the loop would race ahead,
+and every frame waiting for the encoder is a full uncompressed picture: 1080 × 1920 × 4 bytes, about
+8 MB. A few hundred of them is gigabytes. **Backpressure** is the brake: `await video.add(...)` only
+resolves when the output can take more. Inside mediabunny that means waiting whenever 4 frames are
+already queued in the encoder, and waiting for the muxer's previous write. So only a handful of frames
+exist at any moment, and each `VideoFrame` is closed as soon as it is encoded.
+
+Between frames the loop also yields to the page (`scheduler.yield()`, or a `MessageChannel` message
+where that is missing), so the preview paints, the progress bar moves and a click on Cancel gets
+through. The sound goes to the muxer one second at a time, a second ahead of the picture: mediabunny
+interleaves the tracks by time, and handing it a whole minute of audio up front would only make it hold
+the audio back.
+
+A lost WebGL context (a phone reclaiming GPU memory, a GPU reset) blanks the canvas. A frame copied
+then would freeze the picture in the file while the counter ran on, so every frame checks the context
+before and after the copy. On a loss the export waits for the context to come back (`renderer.js`
+re-bakes what lived on the GPU, 4.10), draws the same moment again without stepping the piece twice,
+and says so when it is done. Measured with a simulated one-second loss 3 s in: the file came out
+identical, apart from its creation timestamps, to an undisturbed export. If the context does not come
+back within 15 s, the export stops with a clear message and the page is put back.
+
+### 7.5 The offline click track
+
+The live clicks cannot just be recorded: they play as frames are drawn, and an export draws frames
+faster or slower than real time, so the sound would drift off the picture. Instead the sound is
+rendered before the first frame, from the schedule alone (`export/audio.js`):
+
+1. `landingFrames` works out the video frame on which each piece is first seen landed, from its start
+   time, the drop length and the speed;
+2. `clickEvents` follows the live rule in `audio/clicks.js` step for step: one candidate click per frame
+   in which pieces land, louder with more pieces, at least 40 ms apart, quieter as the count climbs
+   (857 clicks at 1×, 441 at 2×);
+3. an `OfflineAudioContext` (Web Audio rendering into a buffer as fast as it can, instead of to the
+   speakers) renders the mix. Each click is the live sound: a 50 ms burst of decaying noise through a
+   band-pass filter at a random pitch.
+
+The one change from the live sound: the randomness comes from the seeded stream `stream('audio')`
+instead of `Math.random`, so the same export always sounds the same. Clicks are added just in time
+(the render pauses every second and adds the next ones): with all of them created up front, the
+renderer carried every node chain through the whole minute, 7.7 s against 0.65 s, for identical
+samples. Firefox's offline context cannot pause, so there they are all added up front: slower, same
+sound.
+
+Two encoder delays had to be cancelled to keep each click on its frame:
+
+- **AAC priming.** An AAC encoder starts its output with 2,112 samples of "priming" before the first
+  real sample; uncorrected, every click was 44 ms late. So the audio is handed to the encoder starting
+  2,112 samples before zero, and mediabunny writes an **edit list**, a note in the MP4 telling players to
+  skip that much. ffmpeg, Chrome and Firefox then play in sync, but Apple's AVFoundation (Safari,
+  QuickTime, iOS) played 44 ms *early*: it trimmed the priming twice. Files from Apple's own encoder
+  carry a small AAC "roll" sample group that mediabunny does not write. `export/mp4.js` adds it to the
+  finished file (a byte-level edit of the index that also moves every chunk offset by the inserted
+  length), and AVFoundation then reads it in sync.
+- **Opus pre-skip.** Opus has its own delay, 312 samples. In WebM the header declares it; in MP4,
+  Firefox's files played 6.5 ms late in AVFoundation until the audio was started 312 samples early in
+  the same way.
+
+`scripts/check-video.mjs` measures sync in the file itself: every isolated click must start on its
+landing frame within 3 ms, and every 4-second stretch of clicks must line up best at 0 ms, decoded once
+by ffmpeg and once the way AVFoundation decodes it (a small Swift helper, on macOS). Measured on a
+vertical 1× export: worst 0.02 ms in both.
+
+### 7.6 MP4 or WebM: the fallback chain
+
+The apps these videos are for want **MP4 with H.264 video and AAC sound**, so that comes first. Not
+every browser can encode all of it, so when the panel opens (and whenever the format or Sound changes)
+it asks the browser, with the exact settings the export will use (`probeCapabilities`), and shows the
+answer under the options, for example "1080×1920 · 60 fps · MP4 · H.264 + AAC". `pickEncoding` in
+`export/plan.js` takes the first that works:
+
+| | Container and codecs | When | What the panel adds |
+|---|---|---|---|
+| 1 | MP4, H.264 (+ AAC) | both encoders exist (Chrome; Safari's engine) | nothing |
+| 2 | MP4, H.264 + Opus | Sound is on but there is no AAC encoder (Firefox) | the sound is Opus, which some apps may not take |
+| 3 | WebM, VP9 (+ Opus) | no H.264 encoder | Instagram needs MP4; VP9 can take several minutes |
+| 4 | WebM through `MediaRecorder` | no WebCodecs at all | frames may be dropped; keep the tab in front |
+| | none | none of the above | "This browser cannot encode video." |
+
+Why option 2 exists: before it, Firefox fell back to WebM and VP9 whenever Sound was on. Its VP9 encoder
+is software, measured about 7× slower than its hardware H.264 (418 s against 57 s for a square 2×
+export), and Instagram does not take WebM. Opus in MP4 plays in current browsers, ffmpeg and
+AVFoundation; whether Instagram and TikTok accept it was not tested.
+
+WebM stores times in whole milliseconds, so 1/60 s rounds to 16 or 17 ms; the checker accepts each
+frame on the nearest millisecond to k/60. MP4 stores them exactly.
+
+Option 4 is the brief's original approach, kept as the last resort. It is still frame-stepped, and it
+uses `captureStream(0)` with `requestFrame()` (one captured frame per drawn frame, which avoids the
+60 Hz sampling loss of 7.1), but `MediaRecorder` stamps frames with the wall clock, so every frame still
+has to be drawn on time. The panel says so before and after ("Recorded in real time: some frames may be
+missing").
+
+Smaller fallbacks inside the chain:
+
+- an encoder that refuses the explicit level 4.2 string still gets H.264 with mediabunny's own string;
+- an encoder without a working quantizer gets a bitrate (7.3);
+- if the overlay's web fonts have not loaded within 4 s, the *whole* video uses the fallback fonts,
+  never a mix (a font arriving mid-export used to switch the typeface mid-file), and the done screen says
+  so;
+- for the scripts, `?encoder=webm` or `?encoder=mediarecorder` force a fallback, and `?exportMbps=N` and
+  `?exportQp=N` override the quality for measurements.
+
+### 7.7 The export-only camera fit, and the near plane
+
+The live camera's end view crops the panel's corners, most on a phone: it frames a circle of radius 57
+while the corners are 52·√2 ≈ 73.5 from the centre (left as it is for the owner, section 9). A video
+should end on the whole panel. So the export's camera (`createCameraRig(..., { fit: true })` in
+`anim/camera.js`) follows the live path and, during the last part of the pull-back, eases further back,
+to where all four corners of the panel, and the outer top corners of the wooden curb, are in frame for
+the video's shape.
+
+`fitDistance` solves that directly. For a camera at distance d looking at the centre, a corner at
+position p sits at depth d − p·u and at p·r across and p·v up (u, r and v being the camera's backward,
+right and up directions). It is inside the frame when each offset is under depth × tan(half the field of
+view). Each corner gives a lower bound on d, and the largest wins. The extra distance blends in along a
+smooth S-curve as the framed radius goes from 30 to 57, through a soft "never closer than the live path",
+so there is no jump and no kink. The rig's `zoom` reports the extra distance, so the fog, the shadow box
+and the sweep's aim all widen to cover what is on screen. The live camera never uses the fit (a test
+checks that its path is unchanged), and the export's opening is identical to the live one.
+
+**The near plane.** Vertical exports flickered: on some frames whole areas of pieces turned cream. The
+cause was not the export but the depth buffer. Its precision is set by the camera's *near clip plane*:
+the smallest depth step it can tell apart is about distance² / (near × 2²⁴). The near plane was fixed
+at 0.1, so at the vertical video's end distance (about 470 units) that step was about 0.12, against piece
+tops only about 0.3 above the bed, and the bed, drawn after the pieces, won the ties. The near plane now
+follows the distance (`NEAR_PER_DISTANCE = 0.01`, giving a step of about 0.003 there). Nothing on screen
+is ever nearer the camera than about 0.4 × its distance, so nothing is clipped.
+
+The same camera code serves the live page, where the glitch existed too: counted over every displayed
+frame of a run on a 1080×1920 portrait page, zoomed out a little after Finish, 210 of 2,179 frames
+flickered before and 0 of 2,184 after. It changes the live picture slightly, only on piece edges and the curb where the glitches were:
+0.8% of pixels on a 1280×800 view and 4.1% on a 390×844 phone view. It is the one change to the live
+look in this phase, and it waits for the owner's eye (section 9). It also roughly halved the vertical
+file at the old quantizer (220 to 109 MB): the encoder had been paying to code the flicker.
+
+### 7.8 The panel, and recording from a script
+
+**The panel** (`ui/export-panel.js`; markup in `index.html`) has three states:
+
+- **form**: format, speed (with each length, 1:01 or 0:37, from the plan), Title and counter, Sound
+  (it starts from the HUD's Sound setting the first time and remembers your choice after that), the line
+  saying which encoder will be used, Start and Close;
+- **run**: the HUD hides, and the frames are shown as they are encoded, letterboxed to the window (with
+  reduced motion, a still of the page instead, since the frames flash past at several times real speed).
+  A progress bar, frames done, time elapsed, "about 0:08 left" (from the rate over the last 2.5 s, shown
+  once 2 s and 3% of the frames have gone by: the first frames, a close-up of a few pieces, encode much
+  faster than the finished panel), and Cancel;
+- **done**: the file name, length and how long it took, any notes, Download (with the size) and Close.
+
+Escape closes the panel from the form or the done screen, never mid-export. Closing never loses the
+video: the form offers "Download last video" until a new export starts, and leaving the page while an
+export runs, or before the video is downloaded, asks first. The button is hidden in the prototype build
+(`?legacy=1`), which has no schedule to make the sound from.
+
+**`scripts/record.mjs`** (`npm run record`) makes a video the way a person would: a fresh headless
+browser, the app's own Export video button, real clicks on the panel's chips and Start, and a real click
+on Download. It reads the page only to compare the live piece before and after, then runs
+**`scripts/check-video.mjs`** on the downloaded file. The checker composes and schedules the panel in
+Node with the app's own code to know what to expect, then measures the file with ffprobe and ffmpeg:
+
+- codec, H.264 High (or VP9 in WebM), 4:2:0 limited range (`yuv420p`), exact size, 60 fps;
+- frame count equal to the plan, and every frame's time exactly k/60;
+- every frame decoded and fingerprinted with the overlay's box blanked (the counter changes as pieces
+  land and would hide a frozen picture): no repeated frame while pieces are in the air;
+- no one-frame flicker: no area of a frame may jump away from both its neighbours while they agree;
+- with sound: AAC or Opus at 48 kHz, as long as the video, in sync with ffmpeg and with AVFoundation;
+- stills at 0.5 s, 3 s, 20 s, the end of the laying, mid-sweep and the last frame, to look at.
+
+Measured during the review fixes, headless on the development machine's GPU (Playwright's Firefox and
+WebKit builds for those two engines):
+
+| Export | Browser | Made in | File | `check-video` |
+|---|---|---|---|---|
+| vertical 1×, sound | Chrome | 22.6 s | 188 MB | all pass |
+| square 1×, silent | Chrome | 25.1 s | 170 MB | all pass |
+| landscape 1×, sound | Chrome | 22.7 s | 196 MB | all pass |
+| vertical 2×, sound | Chrome | 14.0 s | 151 MB | all pass |
+| vertical 2×, sound, CPU slowed 4× | Chrome | 13.7 s | 151 MB | all pass; same media bytes as the row above |
+| square 2×, sound, reduced motion, 2× screen | Chrome | 16.0 s | 140 MB | all pass; live page identical before and after |
+| square 2×, sound, single-file build from `file://` | Chrome | 16.1 s | 140 MB | all pass |
+| square 2×, sound (H.264 + Opus) | Firefox | 55.4 s | 100 MB | all pass |
+| square 2×, sound | WebKit | 17.8 s | 71 MB | all but `yuv420p` (it writes full-range video) |
+
+Chrome makes a 1-minute video in under half a minute, and slowing its CPU 4× did not slow the export:
+the heavy work is the GPU's and the hardware encoder's. Firefox's and WebKit's files are smaller because
+they use a bitrate (7.3); WebKit's encoder delivers less than it is asked for (15 of 21 Mbit/s here).
+
+What is still open is listed in section 9.
+
+---
+
+## 8. Testing and verification
+
+**Unit tests** (`npm test`, Node's built-in test runner, 173 tests, about 4 seconds):
 
 | File | Tests | Covers |
 |---|---|---|
@@ -800,7 +1168,9 @@ instead).
 | `tests/pieces-geometry.test.mjs` | 17 | slabs, data texture layout, shader injection, the tile system |
 | `tests/schedule.test.mjs` | 8 | start times and every query against brute force |
 | `tests/app.test.mjs` | 18 | stage label, shadow fit, light sweep, camera, governor |
+| `tests/light-aim.test.mjs` | 8 | where the sweep passes behind the panel, re-aimed as the camera moves |
 | `tests/port.test.mjs` | 16 | the prototype's pattern, tiles and rig still behave as before |
+| `tests/export.test.mjs` | 21 | video export: timeline and frame counts, encoder fallback, H.264 level, click track, overlay placement, the MP4 fix-up, time left, the near plane, the export camera fit |
 
 **Rendered checks** (headless Chrome on the real GPU, `scripts/`). The owner's rule: checks go
 through the real input path (a cold load in a fresh page, real clicks, drags, wheel and touch
@@ -813,22 +1183,28 @@ line up choreography; it is never evidence.
   from `file://` (and with workers blocked), and the glint measurement (4.8).
 - `compare-port.mjs`: port vs prototype, frame for frame (section 5).
 - `check-pieces.mjs`: the GPU pose against the JavaScript pose, pixel by pixel, plus frame rate.
+- `record.mjs` and `check-video.mjs`: a video made through the real Export panel, then the file
+  itself measured with ffprobe and ffmpeg against the export plan (7.8).
 - `preview-*.mjs`: flat PNG previews of the field, each medallion and the whole panel, for looking at
   the pattern without the 3D scene.
 
 ---
 
-## 8. Status, open questions and limits
+## 9. Status, open questions and limits
 
 **Done.** The phase-1 goal: the prototype ported to r186 in modules; the zellige engine; the field;
 three medallions with Moorish chosen and its hearts broken up; the border; the composed panel of
 10,209 pieces with no gap ring; GPU pieces with animated shadows; the aimed light sweep; the
-performance guard; startup in a worker; the single-file build. 144 tests pass.
+performance guard; startup in a worker; the single-file build. Then the video export (section 7):
+three formats at 1× and 2×, every frame rendered on a fixed step and encoded with its exact timestamp,
+MP4 with H.264 (+ AAC) where the browser can, and each file measured by a checker. 173 tests pass.
 
 **Look changes made in review that wait for the owner's eye:** faceted gold; the honey ochre
 `#a8721f` (darker than the gold, so the metal reads as metal; the prototype's was `#b98128`); the
 narrower grout (0.12) with the thinner strap bevel; the sinopia rays starting at the first circle
-(the owner may want a small centre mark).
+(the owner may want a small centre mark); and, from the video export phase, the camera's near clip
+plane following its distance (7.7). That one removes depth flicker from the live page too, and changes
+about 0.8% of pixels on a desktop view and 4% on a phone, on piece edges and the curb.
 
 **Not verified:**
 
@@ -842,7 +1218,8 @@ narrower grout (0.12) with the thinner strap bevel; the sinopia rays starting at
 **Deferred, with reasons:**
 
 - At the default finished framing the panel's corners are cut off (most visible on a phone). Fixing
-  it means changing the prototype's tuned pull-back, so it is left to the owner.
+  it means changing the prototype's tuned pull-back, so it is left to the owner. (A video export does
+  end on the whole panel, through a camera fit used only in the video, 7.7.)
 - Overhead the colours read lighter than the palette. That is the prototype's tuned lighting and
   exposure, which the legacy build still matches.
 - From the default view the bows can still group into heart-like pairs; the cuts stay as the owner
@@ -850,13 +1227,31 @@ narrower grout (0.12) with the thinner strap bevel; the sinopia rays starting at
 - The glaze ripple costs about 27% of GPU time when zoomed right in; changing it changes the look.
 - A sharper bed texture for the close-up; smaller vertex formats (both for memory).
 
-**Not built yet** (brief section 5, the next phase): video export, pattern and palette presets, a
-hand or trowel placing the first pieces, dust puffs, a shareable `#seed` URL (the seeded streams are
-ready for it).
+**Video export: open, and not verified:**
+
+- Every 2× export has a one-frame shadow fade at frame 213 or 214, in the opening, for every preset.
+  The checker's flicker score there is up to 7.7 (square), under its limit of 10. The cause is in the
+  renderer or light code, not the export; a follow-up task was started for it.
+- WebKit (Safari's engine) writes full-range video (`yuvj420p` instead of `yuv420p`), so that one check
+  fails on its files. Not fixed.
+- Firefox's files are labelled H.264 level 3.2, below what 1080 lines at 60 fps calls for. ffmpeg and
+  AVFoundation read them and every check passed.
+- Opus sound in MP4 (Firefox with Sound on): whether Instagram and TikTok accept it was not tested.
+- The picture "breathes" slightly every 2 s, at each key frame (the change between frames there is 1.35×
+  that of its neighbours). A coarser quantizer for key frames was tried and made it worse (`plan.js`).
+- Memory: the whole file (140 to 200 MB) stays in memory for fast start, and for a moment there are two
+  copies while the download is made. One copy would need a streaming writer and giving up fast start.
+- Not tried: real Safari on a Mac or an iPhone (WebKit was tested through Playwright's build, and Apple's
+  playback through AVFoundation), real phones, and real uploads to Instagram or TikTok.
+- The `MediaRecorder` fallback cannot promise every frame; the panel says so.
+- `capture/video/` holds about 19 GB, mostly experiment files that can be deleted.
+
+**Not built yet** (brief section 5): pattern and palette presets, a hand or trowel placing the first
+pieces, dust puffs, a shareable `#seed` URL (the seeded streams are ready for it).
 
 ---
 
-## 9. Glossary
+## 10. Glossary
 
 **Zellige.** Moroccan mosaic of hand-cut pieces of glazed terracotta set in mortar, usually in
 geometric patterns. Each piece is chipped to shape from a glazed tile.
@@ -958,9 +1353,50 @@ seed.
 **WebGL context loss.** The browser can take the GPU away from a page (for example a phone freeing
 memory); everything that lived only on the GPU must be rebuilt when it comes back.
 
+**Near clip plane, depth precision.** A camera draws nothing nearer than its near plane. The depth
+buffer's precision is crowded close to that plane, so the nearer it is, the coarser depth gets far away.
+
+**Fixed timestep.** Advancing a simulation by the same amount at every step, however long each step takes
+to compute. The video export's render mode (7.2).
+
+**Codec, container, muxing.** A codec compresses pictures (H.264, VP9) or sound (AAC, Opus). A container
+(MP4, WebM) is the file that holds the compressed tracks and an index of when each frame is shown.
+Muxing is packing the tracks into the container.
+
+**H.264 profile and level.** The profile says which compression tools a file uses (High here); the level
+caps the work a player must do per second (frame size × frame rate, bitrate). 1080 lines at 60 fps
+needs level 4.2.
+
+**Key frame.** A frame stored whole, which a player can start or seek from; the frames between store
+only what changed.
+
+**Quantizer vs bitrate.** Two ways to tell an encoder how hard to compress. A constant quantizer fixes
+how much detail each frame may lose, and the size follows the picture; a bitrate fixes the bits per
+second, and the quality follows the picture. ffmpeg's CRF is a cousin of the constant quantizer.
+
+**WebCodecs.** The browser API that gives a page the video and audio encoders and decoders directly, one
+frame at a time, with timestamps the page chooses. **`MediaRecorder`** and **`captureStream`** instead
+record a live stream (here, a canvas) in real time.
+
+**Backpressure.** A slow consumer making a fast producer wait, so unfinished work cannot pile up in
+memory.
+
+**Priming, pre-skip, edit list.** Audio encoders put a short delay before the real sound (AAC calls it
+priming, Opus pre-skip). An edit list in an MP4 tells players which part of a track to skip.
+
+**Fast start.** An MP4 with its index (the `moov` box) at the front, so playback can begin before the
+whole file has arrived.
+
+**4:2:0, limited and full range (`yuv420p`, `yuvj420p`).** Video keeps brightness at full resolution and
+colour at a quarter of it (4:2:0). Limited range puts black and white at levels 16 and 235, the norm for
+video; full range uses 0 to 255.
+
+**`OfflineAudioContext`.** A Web Audio graph that renders into a buffer as fast as it can, instead of
+playing to the speakers in real time.
+
 ---
 
-## 10. Ten likely interview questions
+## 11. Thirteen likely interview questions
 
 **1. Why didn't you keep instancing, like the prototype?**
 Instancing draws one shape many times. Zellige pieces are all different: clipped at boundaries, cut
@@ -1014,15 +1450,16 @@ I listed the breaking changes that affect the picture (light units ×π, colour 
 soft shadows, environment intensity, fog colour, energy conservation) and compensated for each. Then
 I proved it: a script loads the original prototype and the port with the same fake clock, so they
 render exactly the same frames, and compares screenshots. The mean difference is under one level out
-of 255, and 0% of pixels are off by more than 24, at every checkpoint.
+of 255 at every checkpoint, and at most 0.12% of pixels are off by more than 24: the prototype's own
+depth glitches on piece edges, which a later fix to the camera's near plane removed from the port.
 
 **9. How do you keep it smooth, and what haven't you proven?**
 Frame cost here is per pixel, mostly anti-aliased bevel edges. So I cap the pixel ratio at 2 and the
 buffer at 5 megapixels, a governor lowers the ratio in steps if frames stay slow, a far-view geometry
 drops bevel detail that is under a pixel, and the shadow map is only redrawn when something moves.
 Composing the pattern runs in a Web Worker so the page stays responsive while it is cut. What I have
-not proven is 60 fps
-on an actual mid-range laptop GPU: my machine is fast, and my slow-machine test was CPU-bound.
+not proven is 60 fps on an actual mid-range laptop GPU: my machine is fast, and my slow-machine test
+was CPU-bound.
 
 **10. The brief says the gold must glint. How did you make that happen, and how did you measure it?**
 A flat shiny tile only shows the sun when the sun sits at your mirror angle. The original sweep never
@@ -1032,3 +1469,31 @@ so each one swings through its own mirror angle as the sun moves. To measure it 
 from ochre by colour, so a script renders a mask frame (gold magenta, glaze green) with the same
 camera and counts gold pixels that flash and glaze pixels that wash out. The flash dropped by about a
 third, but the wash dropped about elevenfold, so the gold is now what you notice.
+
+**11. How does the video export avoid dropped frames?**
+A screen recording only gets the frames the page manages to draw on time, so a slow machine, or a busy
+moment like the outer field laying hundreds of pieces a second, drops frames into the file. So I took
+real time out of it. The frame loop is split: `step(dt)` advances the piece and draws it, and the export
+calls it with exactly 1/60 s per frame, so frame k is always the piece after k + 1 steps. Each frame
+goes to the hardware encoder through WebCodecs with its own timestamp, k/60, and I await every frame, so
+the encoder sets the pace and only a few frames are ever in flight. A slow machine just takes longer.
+Then I check the file, not the code: a script counts the frames against the plan, checks that every
+timestamp is exactly k/60, and fingerprints every frame to make sure none repeats while pieces move.
+
+**12. How do you keep the sound in sync when the video isn't made in real time?**
+I don't record the sound at all. The export renders it before the first frame: from the laying schedule
+I know the frame on which each piece lands, so I put every click at that frame's time and mix them in an
+`OfflineAudioContext`, with the live page's click sound and throttling rules, seeded so it is the same
+every time. The subtle part was encoder delay. AAC adds 2,112 samples of priming, which made every click
+44 ms late, so I start the audio that much early and the MP4's edit list trims it. Then Apple's players
+were 44 ms early, because they trim it twice unless the file carries a small "roll" sample group, which
+I add to the finished file. I measure sync in the file, with ffmpeg and as Apple's AVFoundation decodes
+it: 0.02 ms.
+
+**13. What did checking the actual files catch that reading the code would not have?**
+Three things. Vertical videos flickered on some frames. That was depth-buffer precision: the camera's
+near plane was fixed at 0.1 while the camera stood 470 units away, so the bed won depth ties against
+pieces 0.3 above it. Making the near plane follow the distance fixed it, in the live page too. Apple's
+players were 44 ms out on the sound. And Firefox said its encoder honoured my quality setting and then
+ignored it, which gave soft 8 Mbit/s files; now a tiny test encode checks whether the setting really
+changes anything before I rely on it. The lesson: measure the output, not what the API says it will do.

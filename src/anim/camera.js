@@ -28,6 +28,15 @@ export const FRAMING = {
   DRIFT_MAX_STEP: 0.5,
   MARGIN: 1.05,      // fit the framed radius with 5% to spare
   PORTRAIT_MIN_ASPECT: 0.45,  // on tall screens back off by 1/aspect (capped) so the width fits
+  // The near clip plane, as a fraction of the camera's distance from the centre. The depth
+  // buffer's precision is set by the near plane: a step of about distance² / (near · 2²⁴). With
+  // the old fixed near of 0.1, at ~450 units away (a portrait screen zoomed out, or a vertical
+  // video's end view) that step was ~0.12, the same size as the float rounding in the vertex
+  // maths, against piece tops only ~0.3 above the bed. The bed is drawn after the pieces and
+  // wins a depth tie, so on some frames it painted cream streaks over whole areas of pieces.
+  // At distance/100 the step there is ~0.003. Nothing on screen is ever nearer the camera than
+  // about 0.4 × its distance (the bed's near edge at the lowest view), so nothing is clipped.
+  NEAR_PER_DISTANCE: 0.01,
 };
 
 /** The viewer's orbit limits. */
@@ -50,15 +59,66 @@ export function portraitFactor(aspect) {
 /** Hermite smoothstep: 0 below a, 1 above b, an S-curve between. */
 const smoothstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
+// --- Video export only ---------------------------------------------------------------------
+//
+// The live end view crops the panel's corners (most on a phone: the framing fits a circle of
+// radius F_MAX = 57 while the corners are 52·√2 ≈ 73.5 out). A video should end on the whole
+// panel. So an export camera (createCameraRig with `fit`) takes the live path and, during the
+// last part of the pull-back, eases into the distance at which all four corners are in frame
+// for the video's aspect. The live camera never uses it.
+
+/** Tunables of the export fit. */
+export const EXPORT_FIT = {
+  HALF: 52,      // the panel's half-width, border included (config.js PANEL.BORDER)
+  MARGIN: 0.06,  // keep the corners this fraction of the half-frame inside the edge
+  // The wooden curb around the bed: its outer top corners must be in frame too (they touched the
+  // left edge and were cut off at the right of the vertical video's last frame). Outer half-width
+  // PANEL.EXT/2 + BED.CURB.thickness = 57 + 2.2, top at 0.1 + 1.4/2 (scene/bed.js); just inside.
+  CURB_HALF: 59.2, CURB_TOP: 0.8, CURB_MARGIN: 0.01,
+  FROM: 30,      // start easing into the fit once the framed radius passes this ...
+  // ... and be fully fitted at FRAMING.F_MAX. Between, the extra distance blends in along a
+  // smoothstep of the framed radius, which itself eases smoothly: no jump, no kink.
+  SOFT: 0.04,    // softness of "never closer than the live path" (a smooth max, see update)
+};
+
+/**
+ * How far from the centre a camera looking at it from (el, az) must stand so that a square of
+ * corners (±half, y, ±half) is inside the frame, `margin` from its edges. By default the whole
+ * finished panel (y = 0).
+ *
+ * For a camera at distance d along the unit vector u, looking at the origin, a point p sits at
+ * depth d − p·u, and at p·r across and p·v up (r, v: the camera's right and up vectors, the
+ * ones three's lookAt builds with world up +y). It is inside the frame when its offset is under
+ * depth × tan(half field of view) on both axes; solving for d gives one bound per corner.
+ * @returns distance in world units
+ */
+export function fitDistance(el, az, fovDeg, aspect, { half = EXPORT_FIT.HALF, margin = EXPORT_FIT.MARGIN, y = 0 } = {}) {
+  const tanV = Math.tan(fovDeg * Math.PI / 360) * (1 - margin), tanH = tanV * aspect;
+  const ce = Math.cos(el), se = Math.sin(el), ca = Math.cos(az), sa = Math.sin(az);
+  const u = [ce * sa, se, ce * ca];          // from the centre towards the camera
+  const r = [ca, 0, -sa];                    // screen right
+  const v = [-se * sa, ce, -se * ca];        // screen up
+  let d = 0;
+  for (const [x, z] of [[half, half], [half, -half], [-half, half], [-half, -half]]) {
+    const pu = x * u[0] + y * u[1] + z * u[2], pr = x * r[0] + z * r[2], pv = x * v[0] + y * v[1] + z * v[2];
+    d = Math.max(d, pu + Math.abs(pr) / tanH, pu + Math.abs(pv) / tanV);
+  }
+  return d;
+}
+
 /**
  * @param camera THREE.PerspectiveCamera
  * @param canvas the element that receives pointer and wheel input
  * @param opts.drift  false: no slow automatic turn (reduced motion: the finished panel holds still)
+ * @param opts.input  false: no pointer or wheel input at all (a video export's camera)
+ * @param opts.fit    true: ease into fitting the whole finished panel at the end (export only;
+ *                    see EXPORT_FIT)
  */
-export function createCameraRig(camera, canvas, { drift = true } = {}) {
+export function createCameraRig(camera, canvas, { drift = true, input = true, fit = false } = {}) {
   let framed = FRAMING.F_MIN;      // eased framed radius ("Fs" in the prototype)
   let userAz = 0, userEl = 0, userZoom = 1;
   let driftSim = 0, lastSim = 0;   // laying time turned through so far (see DRIFT_MAX_STEP)
+  let fitScale = 1;                // export fit: how much further back than the live path (1 = live)
 
   // --- viewer input ---
   // Every pointer that is down (mouse, pen or finger), by id. One pointer turns the view; two
@@ -93,12 +153,14 @@ export function createCameraRig(camera, canvas, { drift = true } = {}) {
   };
   const resetView = () => { userAz = userEl = 0; userZoom = 1; };
 
-  canvas.addEventListener('pointerdown', onDown);
-  canvas.addEventListener('pointermove', onMove);
-  canvas.addEventListener('pointerup', onUp);
-  canvas.addEventListener('pointercancel', onUp);
-  canvas.addEventListener('wheel', onWheel, { passive: false });
-  canvas.addEventListener('dblclick', resetView);
+  if (input) {
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointermove', onMove);
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointercancel', onUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('dblclick', resetView);
+  }
 
   /** The framed radius a laid radius asks for (before easing). */
   const targetFraming = rLaid => clamp(rLaid * FRAMING.F_PER_R + FRAMING.F_PAD, FRAMING.F_MIN, FRAMING.F_MAX);
@@ -129,8 +191,24 @@ export function createCameraRig(camera, canvas, { drift = true } = {}) {
     d *= portraitFactor(camera.aspect);
     d *= userZoom * (1.25 - 0.25 * Math.sin(el));   // low views stand back a little further
 
+    if (fit) {
+      // Export only: how much further back the whole finished panel needs to be in frame. A
+      // smooth max with 1 (never closer than the live path), blended in from FROM to F_MAX.
+      const need = Math.max(
+        fitDistance(el, az, camera.fov, camera.aspect),
+        fitDistance(el, az, camera.fov, camera.aspect, { half: EXPORT_FIT.CURB_HALF, y: EXPORT_FIT.CURB_TOP, margin: EXPORT_FIT.CURB_MARGIN }),
+      ) / d;
+      const atLeastLive = (need + 1 + Math.sqrt((need - 1) ** 2 + EXPORT_FIT.SOFT ** 2)) / 2;
+      fitScale = 1 + smoothstep(EXPORT_FIT.FROM, FRAMING.F_MAX, framed) * (atLeastLive - 1);
+      d *= fitScale;
+    }
+
     camera.position.set(d * Math.cos(el) * Math.sin(az), d * Math.sin(el), d * Math.cos(el) * Math.cos(az));
     camera.lookAt(0, 0, 0);
+    // The depth range follows the distance, so the depth buffer stays fine enough to separate
+    // the pieces from the bed at any zoom (see FRAMING.NEAR_PER_DISTANCE)
+    const near = d * FRAMING.NEAR_PER_DISTANCE;
+    if (camera.near !== near) { camera.near = near; camera.updateProjectionMatrix(); }
   }
 
   return {
@@ -149,8 +227,12 @@ export function createCameraRig(camera, canvas, { drift = true } = {}) {
     syncDrift(sim) { driftSim = lastSim = sim; },
     /** The eased framed radius (the light uses it to size the shadow box). */
     get framing() { return framed; },
-    /** The viewer's zoom factor (1 = the automatic path). */
-    get zoom() { return userZoom; },
+    /**
+     * How much further back than the automatic path the camera stands (1 = on the path): the
+     * viewer's zoom, times the export fit (always 1 for the live camera). The fog, the shadow
+     * box and the sweep's aim all scale with it, so they cover what is on screen.
+     */
+    get zoom() { return userZoom * fitScale; },
     dispose() {
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onMove);

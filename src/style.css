@@ -36,3 +36,41 @@ button[aria-pressed="true"]{border-color:var(--gold);color:var(--gold)}
 #err[hidden],.hud[hidden]{display:none}
 #err{position:fixed;inset:0;display:grid;place-items:center;padding:24px;text-align:center;font-family:var(--f-display);font-size:18px}
 @media (max-width:520px){.hint{display:none}.ctrls button{padding:6px 9px}}
+
+/* Video export (ui/export-panel.js). The panel is a HUD pill; its options are chips styled like
+   the HUD buttons (native radios and checkboxes laid over them, so keyboard and screen readers
+   get real form controls). While the panel is open the HUD's bottom row steps aside; while a
+   video is recorded the whole HUD is hidden and #xp-frame shows the frames being encoded. */
+.xp{box-sizing:border-box;position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 16px);transform:translateX(-50%);width:min(420px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;padding:14px 16px 16px;z-index:2}
+.xp[hidden],.xp [hidden],#xp-frame[hidden],#xp-still[hidden]{display:none}
+.xp-title{font-family:var(--f-display);font-weight:400;font-size:20px;letter-spacing:.04em;line-height:1.1;margin:0 0 12px}
+.xp fieldset{border:0;margin:0 0 12px;padding:0;min-width:0;display:flex;flex-wrap:wrap;gap:6px}
+.xp legend{float:left;width:100%;padding:0;margin-bottom:6px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold)}
+.xp-opt{position:relative;display:inline-flex}
+.xp-opt input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+.xp-opt span{font-size:12px;letter-spacing:.06em;color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:7px 11px;font-variant-numeric:tabular-nums}
+.xp-opt small{font-size:10.5px;color:var(--ink-dim);letter-spacing:.04em;margin-left:4px}
+.xp-opt:hover span{background:rgba(243,236,224,.08)}
+.xp-opt input:checked + span{border-color:var(--gold);color:var(--gold)}
+.xp-opt input:focus-visible + span{outline:2px solid var(--gold);outline-offset:2px}
+.xp-note{font-size:11px;line-height:1.45;color:var(--ink-dim);letter-spacing:.03em;margin:2px 0 12px}
+.xp-actions{display:flex;gap:8px;flex-wrap:wrap}
+.xp-primary{border-color:var(--gold);color:var(--gold)}
+.xp-link{display:inline-block;font-size:12px;letter-spacing:.06em;text-decoration:none;border:1px solid var(--gold);border-radius:7px;padding:7px 11px;font-variant-numeric:tabular-nums}
+.xp-link:hover{background:rgba(243,236,224,.08)}
+.xp-link:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+button:disabled:hover{background:transparent}
+.xp-status{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin:0 0 8px;overflow-wrap:anywhere}
+.xp-done .xp-status{text-transform:none;letter-spacing:.04em;color:var(--ink);font-size:12px}
+.xp-bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+.xp-bar i{display:block;height:100%;width:0;background:var(--gold)}
+.xp-stats{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--ink-dim);letter-spacing:.04em;font-variant-numeric:tabular-nums;margin:8px 0 12px}
+.xp-open .hud .bottom{visibility:hidden}
+.exporting .hud{display:none}
+.exporting #c{visibility:hidden}
+#xp-frame,#xp-still{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#2b2722}
+.xp-last{margin:0 0 12px}
+/* Phones: the panel keeps the HUD's 16 px gutters (border-box above) and its controls are big
+   enough to tap */
+@media (max-width:520px){.xp-opt span,.xp .xp-actions button,.xp-link{min-height:40px;box-sizing:border-box;display:inline-flex;align-items:center}}

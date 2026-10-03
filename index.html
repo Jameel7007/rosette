@@ -36,8 +36,56 @@
         <button id="finish" type="button">Finish</button>
         <button id="sweep" type="button">Sweep light</button>
         <button id="sound" type="button" aria-pressed="false">Sound off</button>
+        <button id="export" type="button" aria-haspopup="dialog" aria-controls="xp" aria-expanded="false" disabled>Export video</button>
       </div>
       <div class="hint">Drag to turn · scroll to zoom · double-click to reset view</div>
+    </div>
+  </div>
+</div>
+<!-- Video export (ui/export-panel.js): while a video is recorded the HUD is hidden and #xp-frame
+     shows each frame as it is encoded, letterboxed to the window; with reduced motion #xp-still
+     shows a still of the page instead -->
+<canvas id="xp-frame" aria-hidden="true" hidden></canvas>
+<canvas id="xp-still" aria-hidden="true" hidden></canvas>
+<div id="xp" class="xp pill" role="dialog" aria-labelledby="xp-title" hidden>
+  <h2 id="xp-title" class="xp-title">Export video</h2>
+  <form id="xp-form" class="xp-form">
+    <fieldset>
+      <legend>Format</legend>
+      <label class="xp-opt"><input type="radio" name="preset" value="vertical" checked><span>Vertical <small>1080×1920 · Reels, TikTok</small></span></label>
+      <label class="xp-opt"><input type="radio" name="preset" value="square"><span>Square <small>1080×1080</small></span></label>
+      <label class="xp-opt"><input type="radio" name="preset" value="landscape"><span>Landscape <small>1920×1080</small></span></label>
+    </fieldset>
+    <fieldset>
+      <legend>Speed</legend>
+      <label class="xp-opt"><input type="radio" name="speed" value="1" checked><span>1× <small id="xp-len-1"></small></span></label>
+      <label class="xp-opt"><input type="radio" name="speed" value="2"><span>2× <small id="xp-len-2"></small></span></label>
+    </fieldset>
+    <fieldset>
+      <legend>Options</legend>
+      <label class="xp-opt"><input type="checkbox" name="overlay" checked><span>Title and counter</span></label>
+      <label class="xp-opt"><input type="checkbox" name="sound"><span>Sound</span></label>
+    </fieldset>
+    <p class="xp-note" id="xp-note" aria-live="polite"></p>
+    <p class="xp-last" id="xp-last" hidden><a id="xp-last-link" class="xp-link" href="#" download>Download last video</a></p>
+    <div class="xp-actions">
+      <button type="submit" id="xp-start" class="xp-primary">Start</button>
+      <button type="button" id="xp-close">Close</button>
+    </div>
+  </form>
+  <div id="xp-run" class="xp-run" hidden>
+    <p class="xp-status" id="xp-status" aria-live="polite">Preparing</p>
+    <div class="xp-bar" id="xp-bar" role="progressbar" aria-label="Frames encoded" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+    <p class="xp-stats"><span id="xp-frames">0 / 0 frames</span><span id="xp-time"></span></p>
+    <p class="xp-note" id="xp-run-note" hidden></p>
+    <div class="xp-actions"><button type="button" id="xp-cancel">Cancel</button></div>
+  </div>
+  <div id="xp-done" class="xp-done" hidden>
+    <p class="xp-status" id="xp-result" aria-live="polite"></p>
+    <p class="xp-note" id="xp-done-note" hidden></p>
+    <div class="xp-actions">
+      <a id="xp-download" class="xp-primary xp-link" href="#" download>Download</a>
+      <button type="button" id="xp-finish">Close</button>
     </div>
   </div>
 </div>

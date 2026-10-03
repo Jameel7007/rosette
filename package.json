@@ -10,7 +10,9 @@
     "build:site": "vite build",
     "preview": "vite preview --mode single",
     "preview:site": "vite preview",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "record": "node scripts/record.mjs",
+    "check-video": "node scripts/check-video.mjs"
   },
   "dependencies": {
     "mediabunny": "1.61.0",

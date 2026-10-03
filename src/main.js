@@ -17,6 +17,11 @@
 // meshes from its output takes 0.07 / 0.14 / 0.31 s, so that part stays here, where three.js
 // is. With the worker the longest main-thread task after the first frame is ~0.1 s (0.4 s at
 // 4×), and the main thread still has a fallback (composeOffThread below).
+//
+// The frame loop is split in two: step(dt) advances one *playback* of the piece by dt seconds
+// and draws it; frame() feeds it the real frame time. A video export (export/record.js) plays
+// its own playback through the same step(), exactly 1/60 s per encoded frame, at the video's
+// size, then hands the page back exactly as it was (beginExport / endExport below).
 import { mulberry, stream, SEED } from './util/rand.js';
 import { createRenderer, pixelRatioCeiling } from './scene/renderer.js';
 import { createGovernor } from './scene/governor.js';
@@ -24,6 +29,7 @@ import { createBed } from './scene/bed.js';
 import { createCameraRig, portraitFactor } from './anim/camera.js';
 import { createLightRig } from './anim/light.js';
 import { createHud, createStageLabel } from './ui/hud.js';
+import { createExportPanel } from './ui/export-panel.js';
 import { createClicks } from './audio/clicks.js';
 import ComposeWorker from './compose.worker.js?worker&inline';
 import { createZelligeTiles } from './scene/pieces.js';
@@ -64,11 +70,19 @@ function boot() {
 
   let tiles = null;     // the tile system, once built
   let stageAt = null;   // sim → HUD stage label
-  let sim = 0;          // simulation time (seconds at 1×): what the tiles are a function of
-  let clock = 0;        // wall-clock time (capped steps): drives the light sweep
-  let speed = 1;
-  let autoSwept = false;
-  let prevLanded = 0;
+
+  // A playback of the piece: its two clocks, its camera path and its sun. The page plays `live`;
+  // a video export plays its own (beginExport), and `live` waits, untouched, until it is back.
+  const live = {
+    rig, light,
+    sim: 0,          // simulation time (seconds at 1×): what the tiles are a function of
+    clock: 0,        // wall-clock time (capped steps): drives the light sweep
+    speed: 1,
+    autoSweep: !reduceMotion,   // the finale sweep after the last piece (reduced motion: none)
+    autoSwept: false,
+    prevLanded: 0,
+  };
+  let run = live;              // the playback step() advances
   let pendingFinish = false;   // Finish pressed while the panel was still being prepared
   let readyClock = Infinity;   // clock time the tiles started (the governor waits a moment after)
   let shadowDirty = true;      // the pieces jumped (start, Finish, Replay): redraw the shadow map
@@ -78,16 +92,35 @@ function boot() {
       // Before the pieces exist there is nothing to replay (the laying starts from 0 anyway)
       pendingFinish = false;
       if (!tiles) return;
-      sim = 0; tiles.reset(); light.cancel(); shadowDirty = true;
+      live.sim = 0; tiles.reset(); light.cancel(); shadowDirty = true;
     },
-    speed() { speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length]; return speed; },
+    speed() { live.speed = SPEEDS[(SPEEDS.indexOf(live.speed) + 1) % SPEEDS.length]; return live.speed; },
     finish() {
       // Pressed during "Preparing the bed": remember it, and start() applies it
       if (!tiles) { pendingFinish = true; return; }
-      if (sim < tiles.T_END) { sim = tiles.T_END + 0.01; shadowDirty = true; }
+      if (live.sim < tiles.T_END) { live.sim = tiles.T_END + 0.01; shadowDirty = true; }
     },
-    sweep() { light.sweep(clock); },
+    sweep() { light.sweep(live.clock); },
     sound() { return clicks.toggle(); },
+  });
+
+  // The Export video button and its panel (ui/export-panel.js). The host is what the exporter
+  // borrows: the renderer's canvas, step() and the switch into and out of export mode (below).
+  const exportPanel = createExportPanel({
+    host: {
+      get T_END() { return tiles.T_END; },
+      get count() { return tiles.count; },
+      get schedule() { return tiles.schedule; },   // { t0, D }: the export's click track
+      canvas,
+      begin: beginExport,
+      step,
+      redraw,
+      contextLost: () => renderer.getContext().isContextLost(),
+      end: endExport,
+      snapshot,
+    },
+    soundOn: () => clicks.on,
+    reduceMotion,
   });
 
   /** Hands the built tile system to the loop. Before this, the clock stays at 0. */
@@ -98,12 +131,15 @@ function boot() {
     // Reduced motion (or Finish pressed early): show the finished panel, framed at once (no
     // fly-out from the close-up). Reduced motion also skips the automatic sweep.
     const finished = reduceMotion || pendingFinish;
-    sim = finished ? tiles.T_END + 0.01 : 0;
-    if (finished) rig.snap(tiles.rLaidAt(sim));
+    live.sim = finished ? tiles.T_END + 0.01 : 0;
+    if (finished) rig.snap(tiles.rLaidAt(live.sim));
     pendingFinish = false;
-    prevLanded = tiles.landedAt(sim);
-    readyClock = clock;
+    live.prevLanded = tiles.landedAt(live.sim);
+    readyClock = live.clock;
     shadowDirty = true;
+    // Only the zellige build can be exported (its schedule drives the export's sound); the
+    // prototype build (?legacy=1) hides the button instead of leaving it dimmed for ever
+    if (tiles.schedule) exportPanel.ready(); else exportPanel.unavailable();
     stamp('ready');
   }
 
@@ -189,11 +225,15 @@ function boot() {
   // down from it on machines that cannot hold ~60 fps (scene/governor.js)
   const ceiling = () => pixelRatioCeiling(window.devicePixelRatio, window.innerWidth, window.innerHeight);
   const governor = createGovernor({ ceiling: ceiling(), apply: ratio => resize(ratio) });
-  window.addEventListener('resize', () => governor.reset(ceiling()));   // reset() resizes too
+  window.addEventListener('resize', () => {
+    // During an export the canvas is the video's size; the new window size is applied after it
+    if (exporting) { exporting.resized = true; return; }
+    governor.reset(ceiling());   // reset() resizes too
+  });
   resize(governor.ratio);
 
   // Dev aids: jump the simulation clock; read the frame rate and the pixel ratio in use
-  window.__seek = t => { sim = t; rig.syncDrift(t); shadowDirty = true; };
+  window.__seek = t => { if (exporting) return; live.sim = t; rig.syncDrift(t); shadowDirty = true; };
   window.__fps = 0;
   window.__pixelRatio = () => governor.ratio;
   const intervals = [];
@@ -201,64 +241,110 @@ function boot() {
 
   renderer.shadowMap.autoUpdate = false;   // redrawn only when something it shows has moved (below)
 
-  let prev = performance.now();
-  let frames = 0;
-  function frame(now) {
-    const ms = now - prev;
-    prev = now;
-    const dt = Math.min(MAX_DT, ms / 1000);
-    clock += dt;
+  /** Device pixels per world unit at the panel's centre (for the far-view slabs). */
+  const pxPerUnit = () => canvas.height / (2 * camera.position.length() * Math.tan(camera.fov * Math.PI / 360));
 
-    intervals.push(ms); intervalSum += ms;
-    if (intervals.length > FPS_WINDOW) intervalSum -= intervals.shift();
-    window.__fps = intervalSum > 0 ? Math.round(10000 * intervals.length / intervalSum) / 10 : 0;
-    if (clock - readyClock > GOVERN_AFTER) governor.frame(ms);
+  /**
+   * Advances the current playback by `dt` seconds and draws it. The live loop calls it once per
+   * display frame with the real (capped) frame time; a video export calls it once per encoded
+   * frame with exactly 1/60 s, so the picture depends on the frame count, never on wall time.
+   * @returns {{ landed }} pieces landed so far (the export burns this counter into the video)
+   */
+  function step(dt) {
+    const r = run;
+    r.clock += dt;
 
     let landed = 0, started = 0, rLaid = 0;
     if (tiles) {
-      sim += dt * speed;
-      tiles.update(sim);
-      landed = tiles.landedAt(sim);
-      started = tiles.startedAt(sim);
-      rLaid = tiles.rLaidAt(sim);
-      if (landed > prevLanded) clicks.tick(landed - prevLanded, landed);
-      prevLanded = landed;
+      r.sim += dt * r.speed;
+      tiles.update(r.sim);
+      landed = tiles.landedAt(r.sim);
+      started = tiles.startedAt(r.sim);
+      rLaid = tiles.rLaidAt(r.sim);
+      // The clicks and the HUD belong to the live page (an export renders its sound offline)
+      if (r === live && landed > r.prevLanded) clicks.tick(landed - r.prevLanded, landed);
+      r.prevLanded = landed;
       // The underdrawing disappears under pieces as they land (zellige build only)
-      if (tiles.rCoveredAt) bed.setCovered(tiles.rCoveredAt(sim));
+      if (tiles.rCoveredAt) bed.setCovered(tiles.rCoveredAt(r.sim));
 
-      if (landed >= tiles.count && !autoSwept && !reduceMotion) {
-        autoSwept = true;   // once per page load, as in the prototype (Replay does not re-arm it)
-        light.sweep(clock + SWEEP_DELAY);
+      if (landed >= tiles.count && !r.autoSwept && r.autoSweep) {
+        // Once per playback: for the live page once per page load, as in the prototype
+        // (Replay does not re-arm it)
+        r.autoSwept = true;
+        r.light.sweep(r.clock + SWEEP_DELAY);
       }
-      hud.update({ landed, started, total: tiles.count, stage: stageAt(sim) });
+      if (r === live) hud.update({ landed, started, total: tiles.count, stage: stageAt(r.sim) });
     }
 
-    rig.update(dt, rLaid, sim);
+    r.rig.update(dt, rLaid, r.sim);
     // On a portrait screen the camera backs off to fit the width, and zooming out (wheel or
     // pinch) backs it off further; the fog backs off with it, or the panel sinks into it
-    fitFog(portraitFactor(camera.aspect) * Math.max(1, rig.zoom));
-    // Far-view slabs once the bevel is under a pixel (scene/pieces.js DETAIL): device pixels
-    // per world unit at the panel's centre
-    tiles?.setDetail?.(canvas.height / (2 * camera.position.length() * Math.tan(camera.fov * Math.PI / 360)));
+    fitFog(portraitFactor(camera.aspect) * Math.max(1, r.rig.zoom));
+    // Far-view slabs once the bevel is under a pixel (scene/pieces.js DETAIL)
+    tiles?.setDetail?.(pxPerUnit());
 
-    const wasSweeping = light.sweeping;
+    const wasSweeping = r.light.sweeping;
     // The sweep aims its high point at the viewer, just below the mirror height of the far
     // edge on screen (the legacy build keeps the prototype's sweep, which ignores the viewer)
-    light.update(clock, LEGACY ? null : camera.position, rig.framing * rig.zoom);
-    const boxMoved = light.fitShadow(rig.framing, rig.zoom);   // after update: the depth fit uses the sun's height
+    r.light.update(r.clock, LEGACY ? null : camera.position, r.rig.framing * r.rig.zoom);
+    const boxMoved = r.light.fitShadow(r.rig.framing, r.rig.zoom);   // after update: the depth fit uses the sun's height
 
     // The shadow map only changes when a piece moves, the sun moves or the shadow box moves.
     // Once the panel is laid and still, that is almost never, and the depth pass over every
     // piece's triangles is skipped.
-    const moving = tiles && sim <= tiles.T_END;
-    if (shadowDirty || moving || wasSweeping || light.sweeping || boxMoved || !tiles) {
+    const moving = tiles && r.sim <= tiles.T_END;
+    if (shadowDirty || moving || wasSweeping || r.light.sweeping || boxMoved || !tiles) {
       renderer.shadowMap.needsUpdate = true;
       shadowDirty = false;
     }
 
     const r0 = performance.now();
     renderer.render(scene, camera);
-    if (tiles && timing.firstPiecesRenderMs === undefined) timing.firstPiecesRenderMs = Math.round(performance.now() - r0);
+    if (tiles && r === live && timing.firstPiecesRenderMs === undefined) timing.firstPiecesRenderMs = Math.round(performance.now() - r0);
+    return { landed };
+  }
+
+  /**
+   * Draws the current moment again without advancing anything: after a lost WebGL context comes
+   * back, the export redraws the frame it was on (export/record.js). The shadow map was lost with
+   * the context, so it is redrawn too.
+   */
+  function redraw() {
+    renderer.shadowMap.needsUpdate = true;
+    renderer.render(scene, camera);
+    return { landed: run.prevLanded };
+  }
+
+  /**
+   * Paints the live piece, as it is now, onto a 2D context (the export panel's still preview
+   * with reduced motion). step(0) draws the live playback without moving it, in this task, so
+   * the WebGL canvas can be copied before the browser presents and clears it.
+   */
+  function snapshot(target) {
+    if (exporting) return;
+    step(0);
+    target.drawImage(canvas, 0, 0, target.canvas.width, target.canvas.height);
+  }
+
+  let prev = performance.now();
+  let frames = 0;
+  function frame(now) {
+    const ms = now - prev;
+    prev = now;
+    if (exporting) {
+      // The exporter drives step() itself, one fixed step per encoded frame; the live
+      // playback waits where it is
+      requestAnimationFrame(frame);
+      return;
+    }
+    const dt = Math.min(MAX_DT, ms / 1000);
+
+    intervals.push(ms); intervalSum += ms;
+    if (intervals.length > FPS_WINDOW) intervalSum -= intervals.shift();
+    window.__fps = intervalSum > 0 ? Math.round(10000 * intervals.length / intervalSum) / 10 : 0;
+    if (live.clock + dt - readyClock > GOVERN_AFTER) governor.frame(ms);
+
+    step(dt);
     requestAnimationFrame(frame);
 
     // Build the pieces only after the first frame has been presented: the rAF callback runs
@@ -269,6 +355,77 @@ function boot() {
       if (!LEGACY) setTimeout(() => buildZellige().catch(buildFailed), 0);
     }
   }
+
+  // ---------------------------------------------------------------- video export
+  //
+  // export/record.js borrows the renderer through this host. beginExport switches to a
+  // deterministic render mode: the video's exact size at one pixel per pixel, no performance
+  // governor (it would change the resolution mid-file), and a fresh playback from the first
+  // piece with the live camera path (plus a fit of the whole panel at the end, anim/camera.js)
+  // that ignores the viewer's input. endExport puts back everything the live page had.
+
+  let exporting = null;   // while recording: what endExport restores
+
+  function beginExport({ width, height, speed }) {
+    const sc = sun.shadow.camera;
+    exporting = {
+      ratio: renderer.getPixelRatio(),
+      far: tiles.setDetail?.(pxPerUnit()),     // which slabs the live view draws
+      sun: sun.position.clone(),
+      shadowBox: { left: sc.left, right: sc.right, top: sc.top, bottom: sc.bottom, near: sc.near, far: sc.far },
+      shadowBias: sun.shadow.bias,
+      resized: false,                          // set by the resize listener
+    };
+    renderer.setPixelRatio(1);
+    renderer.setSize(width, height, false);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    // Two things remember the past and would carry the live view into the video: the shadow box
+    // is only rebuilt when it moves by more than 0.05 (light.fitShadow), and the slab detail has
+    // a two-threshold band (pieces.setDetail). Measured by hashing every frame handed to the
+    // encoder: exports started from a still, finished page and from a page mid-laying differed
+    // in 2,214 of 2,246 frames. So both start from a known state: the box is rebuilt on the first
+    // frame (an infinite width always counts as moved) and the full slabs are drawn. Now the
+    // export does not depend on the live view: a video started mid-sweep from a zoomed, turned,
+    // 8× page decodes identical to one started from a fresh page. (Across page loads, the bed's
+    // grain canvas, drawn by the GPU, can come out 1 level different in a few pixels, and the
+    // encoder then writes a different but equally good file; so determinism is checked on frame
+    // counts, timing and pixels, never on file checksums.)
+    sun.shadow.camera.right = Infinity;
+    tiles.setDetail?.(Infinity);
+    run = {
+      rig: createCameraRig(camera, canvas, { drift: true, input: false, fit: true }),
+      light: createLightRig(sun, { prototypeShadow: LEGACY }),
+      sim: 0, clock: 0, speed,
+      autoSweep: true,    // the video always ends with the sweep, even with reduced motion
+      autoSwept: false,
+      prevLanded: 0,
+    };
+    shadowDirty = true;
+  }
+
+  function endExport() {
+    // Also called when beginExport failed part way (export/record.js calls end() from a finally):
+    // nothing to undo if it never got as far as saving the live state
+    const saved = exporting;
+    if (!saved) return;
+    if (run !== live) run.rig.dispose();
+    run = live;
+    exporting = null;
+    // Size and pixel ratio: as they were, or, if the window changed meanwhile, what the resize
+    // listener would have given it
+    if (saved.resized) governor.reset(ceiling()); else resize(saved.ratio);
+    tiles.setDetail?.(saved.far ? 0 : Infinity);
+    // The sun and its shadow box exactly as the live light left them (light.fitShadow only
+    // rewrites the box when it moves by more than 0.05)
+    sun.position.copy(saved.sun);
+    Object.assign(sun.shadow.camera, saved.shadowBox);
+    sun.shadow.camera.updateProjectionMatrix();
+    sun.shadow.bias = saved.shadowBias;
+    tiles.update(live.sim);
+    shadowDirty = true;
+  }
+
   requestAnimationFrame(frame);
 }
 

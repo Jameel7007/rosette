@@ -23,7 +23,7 @@
 //      petals, cross on the tip axes and run on as the inner sides of the eight-point stars.
 //   6. Bows. Between two petals and under two stars: a narrow neck between the petal flanks that
 //      opens into two lobes. A line from each star's lower diagonal point, parallel to the crown
-//      line, closes the lobes on the dent axis.
+//      line, closes the lobes on the dent axis (the NOTCH between them).
 //   7. Candies. Between two touching stars, one below the touching point and one above it. The
 //      upper one is closed by lines from the stars' upper diagonal points to the frame circle on
 //      the dent axis; what is left beside each outer star point is a small rim piece.
@@ -32,17 +32,23 @@
 // than about 3 square units are cut the way a craftsman would, along the drawing's own lines:
 //   central star  its 16 points cut off; the body inlaid with a gold khatem (the first piece
 //                 laid), a ring of 8 and a ring of 16, so the opening close-up shows chunky pieces
-//   petals, bows  an outline band in the motif's glaze (strips cut at the corners) around an
-//                 inlaid inner copy in a second glaze, cut down its axis and across
+//   petals        an outline band in the motif's glaze (strips cut at the corners) around an
+//                 inlaid inner copy in a second glaze, cut across
+//   bows          a gold dart on the dent axis, from the neck tip to the notch, splits the bow into
+//                 its two lobes (whole, a bow read from above as a valentine heart); each lobe is
+//                 cut like a petal, band and inlay, and the second lobe is the mirror of the first
 //   kites, candies across their length, into equal pieces
 //   8-point stars centre + points, the centre quartered on the star's own axes
 // The frame bands are rings of trapezoids on one shared polygon, so they meet the disk exactly.
+//
+// If a cut ever fails, cutRosette says so in its warnings and falls back to an exact cut that
+// needs no clipping library (fallbackCut), so a region is never silently left whole.
 //
 // Pure JavaScript (no three.js): runs in Node for tests and scripts.
 
 import {
   lineIntersect, segIntersect, polar, circlePoly, area, centroid, interiorPoint, pointInPolygon,
-  ensureCCW, dedupe, dist, lerp, isSimple, mitreOffset,
+  ensureCCW, dedupe, dist, lerp, isSimple, mitreOffset, normalize, orient, removeCollinear,
 } from '../geom.js';
 import { buildArrangement } from '../graph.js';
 import { strapwork } from '../strap.js';
@@ -99,12 +105,15 @@ export const MOORISH = {
   targetLen: 1.5,
   maxArea: 3.0,
   petalBand: 0.7,             // width of the outline band around an inlaid inner petal
+  // A bow lobe is outlined on every side, the dart's too, so its band is narrower than a
+  // petal's: at 0.5 the 32 lobes keep about as much ochre as the 16 whole hearts had.
+  lobeBand: 0.5,
   segLen: 2.4,                // outline-band pieces are cut at about this length
-  bowCut: 'contour',          // 'contour' (outline band + inlaid inner bow) or 'fan'
   // Palette keys per class. A pair [even, odd] alternates with the 8-fold period (even and odd
   // tip axes, or dent axes). `…Inlay` keys colour the inner copy inside an outline band.
   keys: {
     star: 'W', khatem: 'A', ring1: 'B', ring2: 'W',
+    dart: 'A',                // the bows' darts: a ring of 16 gold glints between the petals
     kite: ['G', 'G'],
     petal: ['B', 'T'], petalInlay: ['T', 'B'],
     bow: ['W', 'W'], bowInlay: ['O', 'O'],
@@ -141,6 +150,11 @@ const reflect = (p, deg) => {
   return [p[0] * c + p[1] * s, p[0] * s - p[1] * c];
 };
 const radius = p => Math.hypot(p[0], p[1]);
+/** p mirrored in the line through the centre with unit direction u. */
+const mirrorIn = (p, u) => {
+  const k = 2 * (p[0] * u[0] + p[1] * u[1]);
+  return [k * u[0] - p[0], k * u[1] - p[1]];
+};
 
 /**
  * All 32 images of a wedge drawing under D16: each segment, its mirror in the tip axis at 0°,
@@ -311,14 +325,43 @@ function templates(g) {
 // ---------------------------------------------------------------------------------------
 
 /**
+ * FOR A COMPOSER (compose.js): what to take from this module, and why.
+ *
+ *   const ros = buildRosette();
+ *   const { exact, warnings } = cutRosette(ros);
+ *
+ * 1. The medallion's pieces are `cutRosette(ros).exact`: exact polygons BEFORE grout and
+ *    wobble, an exact partition of the disk r ≤ R_F (straps and frame bands included). Each has
+ *    { poly (counter-clockwise), key (palette.js), stage (HUD label), kind ('star16' 'kite'
+ *    'petal' 'bow' 'star8' 'candy' 'rim' 'strap' 'band'), layer (laying order, fractional
+ *    inside a region; see cutRosette) } and sometimes sub / inlay / over. Do not re-cut the
+ *    faces from classify's `split`: that would lose the design's own cuts (the centre inlay,
+ *    the outline bands, the bows' gold darts). Finish them together with the field
+ *    (finishPieces: inset by GROUT/2, wobble) so both get the same grout; `tiles` is the same
+ *    set already finished with stream('pieces'), for previews and tests.
+ * 2. Clip the field with `ros.outerPoly` as the hole:
+ *      clipPieces(fieldPieces, { inside: panel, outside: ros.outerPoly })
+ *    It is the G-gon at R_F (G = 128 for the default sizes) whose corners are exactly the outer
+ *    corners of the outermost band, so field and medallion meet without slivers or overlaps.
+ *    A circle with other corners (circlePoly(R_F, 256), arcSegments, a rotated start) would not.
+ * 3. If you build the frame bands yourself instead of taking the 'band' pieces from `exact`,
+ *    pass each band's `maxSeg` and `a0` to bandPieces: they put every band on the same G-gon
+ *    grid as ros.diskPoly and ros.outerPoly (count = G/per sectors per ring), which is what
+ *    makes bands, disk and field share their corners.
+ * 4. Check `warnings`: empty for the default design. Any 'cut-fallback', 'clip-fallback' or
+ *    'oversize' entry means a region was not cut as designed (see cutRosette).
+ */
+
+/**
  * Build the moorish medallion.
  *
  * classify(face) follows the contract ({key, stage, kind, layer, split}) and adds two fields:
  *   cut(fillPoly)  this design's own cut for the face's fill (its strap-shrunk polygon). It
  *                  returns polygons, or {poly, key?, sub?, layer?, inlay?} objects for pieces that
- *                  differ from the face (the centre inlay's khatem and rings; `inlay: true` marks
- *                  the inner copy of a petal or bow, coloured `inlayKey`). `split` is the nearest
- *                  standard mode, for a composer that does not call `cut`.
+ *                  differ from the face (the centre inlay's khatem and rings, the bows' gold
+ *                  darts; `inlay: true` marks the inner copy of a petal or bow lobe, coloured
+ *                  `inlayKey`). It may throw: cutRosette catches that and reports it. `split` is
+ *                  the nearest standard mode, for a composer that does not call `cut`.
  *   inlayKey       palette key of the inlaid inner copy (petals and bows)
  * cutRosette() below runs the whole pipeline with these.
  *
@@ -449,25 +492,6 @@ export function splitByLine(poly, a, d) {
   return parts.length === 2 ? parts : [poly];
 }
 
-/**
- * The outline `poly` with point `p` (which lies on one of its sides) inserted as a vertex and
- * moved to the front, so a fan from p covers the polygon with no sliver at p.
- */
-function rotateTo(poly, p) {
-  const n = poly.length;
-  let best = 0, bestD = Infinity;
-  for (let i = 0; i < n; i++) {
-    const a = poly[i], b = poly[(i + 1) % n];
-    const ab = [b[0] - a[0], b[1] - a[1]], l2 = ab[0] ** 2 + ab[1] ** 2;
-    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2));
-    const d = Math.hypot(a[0] + ab[0] * t - p[0], a[1] + ab[1] * t - p[1]);
-    if (d < bestD) { bestD = d; best = i; }
-  }
-  const out = [];
-  for (let k = 1; k <= n; k++) out.push(poly[(best + k) % n]);
-  return [p, ...out];
-}
-
 /** Unit direction of the tip axis (offset 0) or dent axis (offset 11.25°) nearest to point c. */
 function axisDir(c, offset) {
   const a = Math.atan2(c[1], c[0]) / DEG - offset;
@@ -483,16 +507,6 @@ function rayExit(poly, deg) {
     if (hit) return hit.point;
   }
   throw new Error('moorish: ray misses the polygon');
-}
-
-/** Run a cut that may fail on a degenerate shape; keep the piece whole if it does. */
-function tryCut(fn, poly) {
-  try {
-    const parts = fn(poly);
-    return parts.length ? parts : [poly];
-  } catch {
-    return [poly];
-  }
 }
 
 /**
@@ -537,17 +551,21 @@ function cutAlongAxis(poly, u, maxArea, midrib = true) {
     const proj = h.map(p => p[0] * u[0] + p[1] * u[1]);
     const lo = Math.min(...proj), hi = Math.max(...proj);
     const below = x => { const parts = sliceAcross(h, [0, 0], u, [x]); return parts.length === 2 ? area(parts[0]) : (x <= lo ? 0 : A); };
-    const cuts = [];
+    const even = [], snapped = [];
     for (let k = 1; k < m; k++) {
       // Bisection for the position with k/m of the area below it.
       let a = lo, b = hi;
       for (let it = 0; it < 50; it++) { const mid = (a + b) / 2; if (below(mid) < (A * k) / m) a = mid; else b = mid; }
-      let x = (a + b) / 2;
+      const x = (a + b) / 2;
+      even.push(x);
       const snap = proj.filter(v => v > lo + 1e-6 && v < hi - 1e-6).sort((p, q) => Math.abs(p - x) - Math.abs(q - x))[0];
-      if (snap !== undefined && Math.abs(snap - x) < 0.2 * (hi - lo) / m) x = snap;
-      if (!cuts.length || x > cuts[cuts.length - 1] + 1e-6) cuts.push(x);
+      const xs = snap !== undefined && Math.abs(snap - x) < 0.2 * (hi - lo) / m ? snap : x;
+      if (!snapped.length || xs > snapped[snapped.length - 1] + 1e-6) snapped.push(xs);
     }
-    out.push(...sliceAcross(h, [0, 0], u, cuts));
+    // Snapping moves a cut off the equal-area position, so it can push a piece over maxArea:
+    // then the corner is not worth it and the equal-area cuts are used.
+    const slabs = sliceAcross(h, [0, 0], u, snapped);
+    out.push(...(slabs.every(s => area(s) <= maxArea) ? slabs : sliceAcross(h, [0, 0], u, even)));
   }
   return out;
 }
@@ -631,37 +649,191 @@ function contourCut(poly, band, segLen, u) {
   return { ring, core };
 }
 
+// ---------------------------------------------------------------------------------------
+// When a cut fails: an exact fallback that needs no clipping library
+// ---------------------------------------------------------------------------------------
+
 /**
- * Fan cut: triangles from one point inside the shape (which must see the whole outline) to each
- * side, merged in neighbouring runs while they stay under maxArea. Reads like the ribs of a shell.
+ * Split a convex polygon where a linear function f changes sign: [the part with f ≤ 0, the part
+ * with f ≥ 0], null for an empty side. For a convex polygon a straight cut is simple and exact:
+ * walk the outline, and every edge that crosses the line gives one cut point, which both parts
+ * share. The point is computed from the edge's ends in a fixed order, so two parts that share
+ * an edge (walking it in opposite directions) get the very same point. (lee.js `halves`.)
+ * @param {Poly} poly  convex
+ * @param {(p: Point) => number} f  linear: its zero set is the cutting line
+ * @returns {[Poly | null, Poly | null]}
  */
-function fanCut(poly, apex, maxArea) {
-  // One triangle per side; a side whose triangle is too big is divided evenly.
-  const tris = [];
-  poly.forEach((p, i) => {
-    const q = poly[(i + 1) % poly.length];
-    const m = Math.ceil(Math.abs(area([apex, p, q])) / maxArea - 1e-9);
-    for (let s = 0; s < m; s++) tris.push([apex, lerp(p, q, s / m), lerp(p, q, (s + 1) / m)]);
-  });
-  return mergeFan(tris.filter(t => area(t) > 1e-12), maxArea);
+function splitConvex(poly, f) {
+  // A corner within rounding of the line counts as on it (it goes to both sides), so no cut
+  // point is made a hair away from it.
+  const scale = Math.max(...poly.map(p => Math.abs(f(p))), 1e-300);
+  const fs = poly.map(p => { const v = f(p); return Math.abs(v) <= 1e-12 * scale ? 0 : v; });
+  const neg = [], pos = [];
+  for (let i = 0; i < poly.length; i++) {
+    const j = (i + 1) % poly.length;
+    const a = poly[i], b = poly[j], fa = fs[i], fb = fs[j];
+    if (fa <= 0) neg.push(a);
+    if (fa >= 0) pos.push(a);
+    if ((fa < 0 && fb > 0) || (fa > 0 && fb < 0)) {
+      const [p, q, fp, fq] = a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]) ? [a, b, fa, fb] : [b, a, fb, fa];
+      const x = lerp(p, q, fp / (fp - fq));
+      neg.push(x); pos.push(x);
+    }
+  }
+  const part = pts => { const q = dedupe(pts); return q.length >= 3 && area(q) > 0 ? q : null; };
+  return [part(neg), part(pos)];
 }
 
-/** Merge consecutive fan triangles (sharing the apex) while the merged piece stays small. */
-function mergeFan(tris, maxArea) {
-  const out = [];
-  let cur = null;
-  for (const t of tris) {
-    if (cur && area(cur) + area(t) <= maxArea) cur = [...cur, t[2]];
-    else { if (cur) out.push(cur); cur = t; }
+/**
+ * Slice a convex polygon across its length (its longest chord) into equal-width slabs, as few
+ * as keep every slab ≤ maxArea. Ported from lee.js `convexSplit` (which spaced the cuts by
+ * length instead).
+ * @param {Poly} poly  convex
+ * @param {number} maxArea
+ * @returns {Poly[]}
+ */
+function convexSplit(poly, maxArea) {
+  if (area(poly) <= maxArea) return [poly];
+  let a = poly[0], b = poly[1];
+  for (const p of poly) for (const q of poly) if (dist(p, q) > dist(a, b)) { a = p; b = q; }
+  const u = normalize([b[0] - a[0], b[1] - a[1]]);
+  const along = p => (p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1];
+  const lo = Math.min(...poly.map(along)), hi = Math.max(...poly.map(along));
+  for (let n = Math.ceil(area(poly) / maxArea); n <= 64; n++) {
+    const slabs = [];
+    let rest = poly;
+    for (let k = 1; k < n && rest; k++) {
+      const at = lo + ((hi - lo) * k) / n;
+      const [below, above] = splitConvex(rest, p => along(p) - at);
+      if (below) slabs.push(below);
+      rest = above;
+    }
+    if (rest) slabs.push(rest);
+    if (slabs.every(s => area(s) <= maxArea)) return slabs;
   }
-  if (cur) out.push(cur);
+  return [poly]; // not reached for a real polygon; cutRosette would report it as oversize
+}
+
+/**
+ * Cut a simple polygon into convex parts. Ear clipping (repeatedly cut off a corner triangle
+ * that holds no other corner), then neighbouring triangles re-joined while the union stays
+ * convex (Hertel–Mehlhorn). A convex polygon comes back whole.
+ * @param {Poly} poly
+ * @returns {Poly[]}
+ */
+function convexParts(poly) {
+  const P = removeCollinear(ensureCCW(dedupe(poly)));
+  if (P.length < 3) return [];
+  const scale = Math.max(...P.map(p => Math.abs(p[0]) + Math.abs(p[1])), 1);
+  const flat = 1e-12 * scale * scale;   // orient() below this counts as a straight corner
+  const corner = (cyc, k) => orient(P[cyc[(k + cyc.length - 1) % cyc.length]], P[cyc[k]], P[cyc[(k + 1) % cyc.length]]);
+  const isConvex = cyc => cyc.every((_, k) => corner(cyc, k) >= -flat);
+  const inTriangle = (p, a, b, c) => orient(a, b, p) >= 0 && orient(b, c, p) >= 0 && orient(c, a, p) >= 0;
+
+  // 1. Ear clipping, on vertex indices so shared corners stay identical.
+  const parts = [];
+  const idx = P.map((_, i) => i);
+  while (idx.length > 3) {
+    let k = 0;
+    for (; k < idx.length; k++) {
+      const a = idx[(k + idx.length - 1) % idx.length], b = idx[k], c = idx[(k + 1) % idx.length];
+      if (orient(P[a], P[b], P[c]) <= flat) continue;   // a reflex or straight corner is no ear
+      if (!idx.some(j => j !== a && j !== b && j !== c && inTriangle(P[j], P[a], P[b], P[c]))) break;
+    }
+    if (k === idx.length) break;   // no ear left (a degenerate outline): keep the rest as one part
+    parts.push([idx[(k + idx.length - 1) % idx.length], idx[k], idx[(k + 1) % idx.length]]);
+    idx.splice(k, 1);
+  }
+  parts.push(idx);
+
+  // 2. Re-join two parts across their shared edge while the result stays convex.
+  const join = (A, B) => {
+    for (let i = 0; i < A.length; i++) {
+      const a = A[i], b = A[(i + 1) % A.length];
+      const j = B.indexOf(b);
+      if (j < 0 || B[(j + 1) % B.length] !== a) continue;   // B walks the same edge b → a
+      const out = [];
+      for (let k = 1; k <= A.length; k++) out.push(A[(i + k) % A.length]);   // b … a
+      for (let k = 2; k < B.length; k++) out.push(B[(j + k) % B.length]);    // after a … before b
+      return out;
+    }
+    return null;
+  };
+  for (let merged = true; merged;) {
+    merged = false;
+    for (let i = 0; i < parts.length && !merged; i++) {
+      for (let j = i + 1; j < parts.length && !merged; j++) {
+        const u = join(parts[i], parts[j]);
+        if (u && isConvex(u)) { parts[i] = u; parts.splice(j, 1); merged = true; }
+      }
+    }
+  }
+  return parts.map(cyc => cyc.map(i => P[i]));
+}
+
+/**
+ * The exact fallback for a region whose design cut failed: cut it into convex parts, then
+ * slice every part that is still too big across its length. Plain arithmetic (no
+ * polygon-clipping, which is what usually fails), every piece convex and ≤ maxArea, and the
+ * pieces still tile the region exactly. It is meant to be seen: cutRosette reports every use.
+ * @param {Poly} poly
+ * @param {number} maxArea
+ * @returns {Poly[]}
+ */
+export function fallbackCut(poly, maxArea) {
+  return convexParts(poly).flatMap(part => convexSplit(part, maxArea));
+}
+
+/**
+ * The part of a simple polygon inside a convex region (both counter-clockwise), exactly: its
+ * convex parts, each cut by every side of the region in turn (keeping the inner side).
+ * The fallback for clipping a piece to the medallion disk (exported for the tests: in the
+ * default design no piece sticks out of the disk, so cutRosette never needs it).
+ * @param {Poly} poly
+ * @param {Poly} region  convex
+ * @returns {Poly[]}
+ */
+export function clipToConvex(poly, region) {
+  const out = [];
+  for (let part of convexParts(poly)) {
+    for (let i = 0; i < region.length && part; i++) {
+      const a = region[i], b = region[(i + 1) % region.length];
+      part = splitConvex(part, p => -orient(a, b, p))[0];   // inside = left of a → b
+    }
+    if (part && area(part) > 0) out.push(part);
+  }
   return out;
+}
+
+/**
+ * Run a design's cut and check what it returns: simple counter-clockwise pieces whose areas add
+ * up to the region's. If the cut throws or fails the check, `report` is told why and the region
+ * is cut by fallbackCut instead: it is never silently left whole.
+ * @returns {{poly: Poly}[]}  pieces (the design's own objects keep their extra fields)
+ */
+function checkedCut(cut, poly, maxArea, report) {
+  try {
+    const parts = cut(poly).map(p => (Array.isArray(p) ? { poly: p } : p));
+    if (!parts.length) throw new Error('the cut returned no pieces');
+    if (parts.some(p => p.poly.length < 3 || !(area(p.poly) > 0) || !isSimple(p.poly))) {
+      throw new Error('a piece is not a simple counter-clockwise polygon');
+    }
+    const sum = parts.reduce((s, p) => s + area(p.poly), 0);
+    if (Math.abs(sum - area(poly)) > 1e-9 * area(poly)) throw new Error(`the pieces cover ${sum.toFixed(6)} of ${area(poly).toFixed(6)}`);
+    return parts;
+  } catch (e) {
+    report(e.message);
+    return fallbackCut(poly, maxArea).map(p => ({ poly: p }));
+  }
 }
 
 function makeCutters(g, o) {
   const maxArea = o.maxArea, KEYS = o.keys;
-  /** Pieces that are not symmetric about an axis: cut across their length if too big. */
-  const run = poly => (area(poly) <= maxArea ? [poly] : tryCut(q => splitRun(q, Math.sqrt(maxArea)), poly));
+  /**
+   * Pieces that are not symmetric about an axis: cut across their length if too big.
+   * (splitRun uses polygon-clipping; if it throws, cutRosette falls back and says so.)
+   */
+  const run = poly => (area(poly) <= maxArea ? [poly] : splitRun(poly, Math.sqrt(maxArea)));
 
   return {
     run,
@@ -718,30 +890,52 @@ function makeCutters(g, o) {
     /** Kite: across its length only (it is narrow). */
     kite: poly => cutAlongAxis(poly, axisDir(centroid(poly), HALF), maxArea, false),
     /**
-     * Bow: the narrow neck between the petals is cut off at the waist (the line through the two
-     * shoulders); the two lobes above are cut as a fan from the waist, like the ribs of a shell.
+     * Bow. Whole, a bow read from above as a valentine heart: two lobes, a notch between them
+     * and a point (the neck) toward the centre. So it is split down its dent axis by a gold
+     * DART drawn on four of its own corners: the neck tip (P, where the petal flanks meet), the
+     * two shoulders (S, S1, where the flanks meet the crown lines) and the notch (Y, where the
+     * lobe lines meet). The dart takes the neck, which was a fragile sliver of a piece, and
+     * leaves two lobes; each is cut like a petal (an outline band around an inlaid inner lobe).
+     * The bow's corners are found from the construction points turned onto its axis, so no
+     * coordinate is guessed; if they are not where the construction says, the cut throws and
+     * cutRosette falls back loudly.
      */
     bow(poly) {
       const u = axisDir(centroid(poly), HALF);
-      const proj = p => p[0] * u[0] + p[1] * u[1];
-      // The waist: the shoulders are the reflex corners nearest the inner end.
-      const reflex = poly.filter((p, i) => {
-        const a = poly[(i - 1 + poly.length) % poly.length], b = poly[(i + 1) % poly.length];
-        return (p[0] - a[0]) * (b[1] - p[1]) - (p[1] - a[1]) * (b[0] - p[0]) < 0;
-      }).sort((p, q) => proj(p) - proj(q));
-      if (!reflex.length) return cutAlongAxis(poly, u, maxArea);
-      const waist = proj(reflex[0]);
-      const [neck, heart] = sliceAcross(poly, [0, 0], u, [waist]);
-      if (!heart) return cutAlongAxis(poly, u, maxArea);
-      const neckParts = cutAlongAxis(neck, u, maxArea, false);
-      if (o.bowCut === 'fan') {
-        const apex = [u[0] * waist, u[1] * waist];
-        return [...neckParts, ...fanCut(dedupe(rotateTo(heart, apex)), apex, maxArea)];
-      }
-      // Contour: an outline band around an inlaid inner bow, which is cut down its axis.
-      const c = contourCut(heart, o.petalBand, o.segLen, u);
-      if (!c) return [...neckParts, ...cutAlongAxis(heart, u, maxArea)];
-      return [...neckParts, ...c.ring, ...cutAlongAxis(c.core, u, maxArea).map(p => ({ poly: p, inlay: true }))];
+      const turnBy = Math.atan2(u[1], u[0]) / DEG - HALF;   // from the construction wedge to this bow
+      // Index of the bow's corner nearest a construction point (its strap-shrunk image).
+      const cornerAt = p => {
+        const q = turn(p, turnBy);
+        let best = 0;
+        poly.forEach((v, i) => { if (dist(v, q) < dist(poly[best], q)) best = i; });
+        return best;
+      };
+      const iTip = cornerAt(g.P), iS = cornerAt(g.S), iS1 = cornerAt(g.S1), iNotch = cornerAt(g.Y);
+      const tip = poly[iTip], sh = poly[iS], sh1 = poly[iS1], notch = poly[iNotch];
+      const offAxis = p => Math.abs(u[0] * p[1] - u[1] * p[0]);
+      const tol = 1e-9 * radius(notch);
+      if (new Set([iTip, iS, iS1, iNotch]).size < 4 || offAxis(tip) > tol || offAxis(notch) > tol
+        || dist(mirrorIn(sh, u), sh1) > tol) throw new Error('moorish: bow corners are not where the construction puts them');
+
+      // The fill runs counter-clockwise tip → S → … → notch → … → S1 → tip, so each lobe is the
+      // stretch of outline from a shoulder to the notch, closed by the dart's side.
+      const walk = (a, b) => { const out = []; for (let i = a; ; i = (i + 1) % poly.length) { out.push(poly[i]); if (i === b) break; } return out; };
+      const lobe = walk(iS, iNotch), lobe1 = walk(iNotch, iS1);
+      // One gold piece (1.7 units² by default); only a retuned design with a longer neck would
+      // need it cut across.
+      const darts = cutAlongAxis([tip, sh, notch, sh1], u, maxArea, false).map(p => ({ poly: p, key: KEYS.dart, sub: 'dart' }));
+
+      // One lobe is cut, the other is its mirror image, so the bow stays symmetric about its
+      // axis (cutting each separately would start the band strips at different corners).
+      // Mirrored points that land on the second lobe's corners take those exact corners, so
+      // the pieces still meet the straps and the dart without gaps.
+      const c = contourCut(lobe, o.lobeBand, o.segLen);
+      const pieces = c
+        ? [...c.ring.map(p => ({ poly: p })), ...cutAlongAxis(c.core, u, maxArea, false).map(p => ({ poly: p, inlay: true }))]
+        : cutAlongAxis(lobe, u, maxArea, false).map(p => ({ poly: p }));
+      const snap = p => lobe1.find(q => dist(p, q) <= tol) ?? p;
+      const mirrored = pieces.map(pc => ({ ...pc, poly: pc.poly.map(p => snap(mirrorIn(p, u))).reverse() }));
+      return [...darts, ...pieces, ...mirrored];
     },
     /** Candy (on a dent axis): across, then down the axis if still too big. */
     candy: poly => cutAlongAxis(poly, axisDir(centroid(poly), HALF), maxArea, area(poly) > 2 * maxArea),
@@ -772,28 +966,67 @@ function makeCutters(g, o) {
 /**
  * Lay the medallion out: run the engine on the centre lines, classify and cut every fill, add
  * the straps and the frame bands. Returns the exact pieces (they partition the disk of radius
- * R_F) and the finished tiles (inset by half the grout and wobbled).
+ * R_F, ros.outerPoly) and the finished tiles (inset by half the grout and wobbled).
+ * See "For a composer" above buildRosette for how to use them.
+ *
+ * Every piece: { poly, key, stage, kind, layer } plus, where they apply, `sub` ('khatem',
+ * 'ring', 'point' in the central star; 'dart' in a bow), `inlay` (the inner copy inside an
+ * outline band), `over` (straps: this one passes over at its crossing), `faceId`, and the
+ * face's classify fields (`split`, `inlayKey`).
+ *
+ * `layer` is the laying order. Each ring of regions has an integer layer (classify); the
+ * pieces cut from one region go down from the inside out, so piece i of a region gets
+ *   layer + 0.9 · (r_i − r_min) / (r_max − r_min),   r = the piece's centroid radius
+ * rounded to 1e-6 so mirror and rotated copies of a piece get exactly the same number (sort by
+ * layer, then by angle, for the craftsman's sweep around each ring). Pieces the design places
+ * itself (the centre inlay: khatem 0, ring of 8 1, ring of 16 2, star points 3) keep their
+ * layer. A strap has the integer layer of the later region it bounds, so it goes down just
+ * before that region's first piece. Frame bands: 10, 11, … from the inside out.
+ *
+ * `warnings` gathers the engine's warnings and this function's own:
+ *   'cut-fallback'   a region whose design cut threw or did not tile it exactly was cut by
+ *                    fallbackCut instead; `count` says how many, `at` where
+ *   'clip-fallback'  a piece sticking out of the disk could not be clipped by polygon-clipping
+ *                    and was clipped exactly by clipToConvex
+ *   'oversize'       a fill piece larger than ros.opts.maxArea survived the cut
+ * For the default design the list is empty (tests/rosette-moorish.test.mjs checks it).
  *
  * @param {ReturnType<typeof buildRosette>} ros
- * @param {{targetLen?: number, grout?: number, wobble?: number, rand?: () => number}} [opts]
+ * @param {{targetLen?: number, grout?: number, wobble?: number, rand?: () => number, finish?: boolean}} [opts]
+ *   finish: false skips the medallion-only finished `tiles` (and `dropped`). compose.js passes it:
+ *   it finishes the whole panel in one pass from `exact`, so these were thrown away (6-11 ms).
+ * @returns {{arr: object, sw: object, exact: object[], tiles: object[],
+ *   dropped: {p: object, why: string}[], warnings: {code: string, msg: string, count?: number, at?: Point[]}[]}}
  */
 export function cutRosette(ros, opts = {}) {
-  const { targetLen = ros.opts.targetLen, grout = PIECE.GROUT, wobble = PIECE.WOBBLE } = opts;
+  const { targetLen = ros.opts.targetLen, grout = PIECE.GROUT, wobble = PIECE.WOBBLE, finish = true } = opts;
+  const maxArea = ros.opts.maxArea;
   const arr = buildArrangement(ros.segments);
   const sw = strapwork(arr, { width: ros.strap, targetLen });
   const g = ros.geo;
   const disk = circlePoly(g.R_M, g.G);
+  const failedCuts = [], failedClips = [];
   const exact = [];
   for (const f of sw.fills) {
     const face = arr.faces[f.faceId];
     const { cut, ...cls } = ros.classify(face);
-    const parts = cut ? tryCut(cut, f.poly) : [f.poly];
-    for (const part of parts) {
-      const piece = Array.isArray(part) ? { poly: part } : part;
+    const parts = cut
+      ? checkedCut(cut, f.poly, maxArea, why => failedCuts.push({ at: face.centroid, why: `${cls.kind}: ${why}` }))
+      : [{ poly: f.poly }];
+    // Inside the region, from the inside out (pieces with a layer of their own keep it).
+    const free = parts.filter(p => p.layer === undefined);
+    const rs = free.map(p => radius(centroid(p.poly)));
+    const r0 = Math.min(...rs), span = Math.max(...rs) - r0;
+    for (const [i, p] of free.entries()) {
+      const t = span > 1e-6 ? (0.9 * (rs[i] - r0)) / span : 0;
+      p.layer = Math.round((cls.layer + t) * 1e6) / 1e6;   // symmetric copies differ only in rounding
+    }
+    for (const piece of parts) {
       if (piece.inlay) piece.key = cls.inlayKey ?? cls.key;
       exact.push({ ...cls, ...piece, faceId: f.faceId });
     }
   }
+  const oversize = exact.filter(p => area(p.poly) > maxArea * (1 + 1e-9));
   // A strap is laid with the later of the regions it separates (the frame strap with the rim).
   const faceLayer = arr.faces.map(f => { const c = ros.classify(f); return c.kind === 'star16' ? 3 : c.layer; });
   for (const s of sw.straps) {
@@ -809,8 +1042,15 @@ export function cutRosette(ros, opts = {}) {
   const tol = 1e-9 * g.R_M;
   const clipped = [];
   for (const p of exact) {
-    if (p.poly.every(q => Math.hypot(q[0], q[1]) <= g.R_M + tol)) clipped.push(p);
-    else clipped.push(...tryCut(() => clipPieces([p], { inside: disk, minArea: 0 }), p.poly).map(x => (Array.isArray(x) ? { ...p, poly: x } : x)));
+    if (p.poly.every(q => Math.hypot(q[0], q[1]) <= g.R_M + tol)) { clipped.push(p); continue; }
+    let parts;
+    try {
+      parts = clipPieces([p], { inside: disk, minArea: 0 });
+    } catch (e) {
+      failedClips.push({ at: centroid(p.poly), why: `${p.kind}: ${e.message}` });
+      parts = clipToConvex(p.poly, disk).map(poly => ({ ...p, poly }));
+    }
+    clipped.push(...parts);
   }
   for (const b of ros.bands) {
     for (const poly of bandPieces({ r0: b.r0, r1: b.r1, count: b.count, a0: b.a0, maxSeg: b.maxSeg })) {
@@ -818,6 +1058,23 @@ export function cutRosette(ros, opts = {}) {
     }
   }
   const dropped = [];
-  const tiles = finishPieces(clipped, { grout, wobble, rand: opts.rand ?? stream('pieces'), onDrop: (p, why) => dropped.push({ p, why }) });
-  return { arr, sw, exact: clipped, tiles, dropped, warnings: [...arr.warnings, ...sw.warnings] };
+  const tiles = finish
+    ? finishPieces(clipped, { grout, wobble, rand: opts.rand ?? stream('pieces'), onDrop: (p, why) => dropped.push({ p, why }) })
+    : [];
+
+  const warnings = [...arr.warnings, ...sw.warnings];
+  const list = xs => [...new Set(xs.map(x => x.why))].slice(0, 5).join('; ');
+  if (failedCuts.length) {
+    warnings.push({ code: 'cut-fallback', count: failedCuts.length, at: failedCuts.map(x => x.at),
+      msg: `${failedCuts.length} region(s) could not be cut as designed and were cut by the exact fallback instead (${list(failedCuts)})` });
+  }
+  if (failedClips.length) {
+    warnings.push({ code: 'clip-fallback', count: failedClips.length, at: failedClips.map(x => x.at),
+      msg: `${failedClips.length} piece(s) could not be clipped to the disk by polygon-clipping and were clipped exactly instead (${list(failedClips)})` });
+  }
+  if (oversize.length) {
+    warnings.push({ code: 'oversize', count: oversize.length, at: oversize.map(p => centroid(p.poly)),
+      msg: `${oversize.length} fill piece(s) are larger than maxArea ${maxArea}: ${[...new Set(oversize.map(p => p.kind))].join(', ')}` });
+  }
+  return { arr, sw, exact: clipped, tiles, dropped, warnings };
 }

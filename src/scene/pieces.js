@@ -21,17 +21,42 @@ import { stream, jitter } from '../util/rand.js';
 export const PIECE_LOOK = {
   TILT: 0.03,                 // final resting tilt rx, rz: ± radians (prototype)
   TILT_GOLD: 0.05,            // gold tilts a little more, so pieces glint at different moments
+  // Gold facets: each gold top face is SHADED as if it leaned this many times further along its
+  // resting tilt (so up to ±0.05 × (1 + 8) = ±0.45 rad, ~26°, per axis). Lustre glaze is never
+  // optically flat and every piece is bedded at its own angle; that spread is what makes the gold
+  // flash piece by piece while the sun passes (anim/light.js keeps the sun away from the glaze's
+  // own mirror angle, so only faceted gold can reach it). At rest it also makes the gold read as
+  // metal: neighbouring pieces mirror different parts of the room, some bright, some dark.
+  // Why shading only: tilting the slabs that far would lift the 5-unit darts' tips over a unit
+  // out of the bed. Glaze pieces have no facet (0), so their look is unchanged.
+  // Tuned on rendered sweeps (gold found by a mask render): 4, 6, 8, 10 → 8.
+  FACET_GOLD: 8,
   SY: [0.88, 1.12],           // per-piece height scale
   YB: [-0.03, -0.06],         // how far each piece sinks into the mortar
   TUMBLE: 0.7,                // fx, fz: ± radians of tumble at the start of the fall
   SPIN: 0.9,                  // ± radians of spin at the start of the fall
   ROUGH_GLAZE: [0.15, 0.35],  // per-piece roughness
-  ROUGH_GOLD: [0.18, 0.30],
+  // Gold roughness (was 0.18-0.30): with facets, a slightly broader highlight lets more pieces
+  // catch the passing sun, and each flash lasts long enough to see (sharper gold measured fewer)
+  ROUGH_GOLD: [0.25, 0.38],
   ENV_GLAZE: 0.65,            // the prototype's reflection strengths
   ENV_GOLD: 1.35,
+  // Bevel of the black (K) strap pieces. A strap piece is ~0.36 wide; two full 0.07 bevels
+  // turned ~40% of it into a lighter rounded edge, so overhead the straps read as grey-edged
+  // bars. Half the bevel keeps them black and continuous (rendered before/after, config.js GROUT).
+  BEVEL_STRAP: 0.035,
   RIPPLE: 0.05,               // glaze ripple slope; 0 = perfectly flat glaze
   RIPPLE_FREQ: 1.25,          // ripple cycles per unit (lowest octave)
 };
+
+/**
+ * When to draw the far-view slabs (extrude.js: the bevel's middle ring left out). The bevel is
+ * PIECE.BEVEL wide; once that is about a pixel on screen its rounded profile cannot be seen,
+ * only paid for. Rendered side by side at the finished view (bevel 0.46 and 0.91 px), the two
+ * differ in 0.4-0.6% of pixels and look the same in 4× crops; the GPU time drops 6-14% there.
+ * Two thresholds (hysteresis) so the switch does not flicker while the camera eases.
+ */
+export const DETAIL = { FAR_BELOW_PX: 1.0, NEAR_ABOVE_PX: 1.3 };
 
 /** Pieces per row of the data texture: 512 pieces × 4 texels = 2048 texels, the widest
  *  texture every WebGL2 device must support. 15,000 pieces is then 30 rows. */
@@ -120,9 +145,11 @@ export function createPieces(schedule, { envMap = null, rand = stream('pieces'),
       t0[i], cx, cy, yb,
       fx, fz, spin, sy,
       rx, rz, roughness, seed,
-      color.r, color.g, color.b, 0,
+      color.r, color.g, color.b, gold ? look.FACET_GOLD : 0,
     ], i * 16);
-    (gold ? goldItems : glazeItems).push({ poly: piece.poly, id: i, pivot: [cx, cy] });
+    // The black strapwork may take a smaller bevel than the rest (PIECE_LOOK.BEVEL_STRAP)
+    const ownBevel = piece.key === 'K' && look.BEVEL_STRAP ? look.BEVEL_STRAP : undefined;
+    (gold ? goldItems : glazeItems).push({ poly: piece.poly, id: i, pivot: [cx, cy], bevel: ownBevel });
   }
 
   const texture = new THREE.DataTexture(data, width, rows, THREE.RGBAFormat, THREE.FloatType);
@@ -185,7 +212,8 @@ export function createPieces(schedule, { envMap = null, rand = stream('pieces'),
   const group = new THREE.Group();
   group.name = 'pieces';
   const meshes = [];
-  let vertices = 0, triangles = 0, reducedBevel = 0;
+  let vertices = 0, triangles = 0, lodTriangles = 0, reducedBevel = 0;
+  const details = [];   // per mesh: { mesh, full, far }: two geometries sharing one set of vertices
   const skipped = [];
   const lift = dropHeight + 0.1;
   for (const [name, items, material] of [['glaze', glazeItems, glazeMaterial], ['gold', goldItems, goldMaterial]]) {
@@ -204,36 +232,67 @@ export function createPieces(schedule, { envMap = null, rand = stream('pieces'),
     geometry.boundingBox.expandByScalar(grow);
     geometry.boundingSphere.radius += grow;
 
+    // The far-view slabs: the same vertex buffers (three uploads a shared attribute once),
+    // their own index list and bounds
+    const farGeometry = new THREE.BufferGeometry();
+    for (const name of ['position', 'normal', 'pieceId']) farGeometry.setAttribute(name, geometry.getAttribute(name));
+    farGeometry.setIndex(new THREE.BufferAttribute(built.lodIndex, 1));
+    farGeometry.boundingBox = geometry.boundingBox;
+    farGeometry.boundingSphere = geometry.boundingSphere;
+
     const mesh = new THREE.Mesh(geometry, material);
+    details.push({ mesh, full: geometry, far: farGeometry });
+    mesh.userData.detail = { full: geometry, far: farGeometry };   // both, for tools that compare them
     mesh.name = `pieces-${name}`;
     mesh.castShadow = mesh.receiveShadow = true;
     mesh.customDepthMaterial = depthMaterial;
+    // Draw the pieces before the bed: three sorts opaque objects by material id first, and the
+    // bed's materials are older, so it was drawn first and then covered. Drawn after the pieces,
+    // the bed under them fails the depth test and its shader never runs (free on GPUs that
+    // already skip hidden pixels, a saving on most laptop GPUs).
+    mesh.renderOrder = -1;
     group.add(mesh);
     meshes.push(mesh);
     vertices += built.vertices;
     triangles += built.triangles;
+    lodTriangles += built.lodTriangles;
     reducedBevel += built.reducedBevel;
     skipped.push(...built.skipped);
   }
 
   const stats = {
-    pieces: N - skipped.length, vertices, triangles,
+    pieces: N - skipped.length, vertices, triangles, lodTriangles,
     glaze: glazeItems.length, gold: goldItems.length,
     reducedBevel, skipped: skipped.length,
     dataTexture: `${width}×${rows} RGBA32F`,
     buildMs: Math.round(performance.now() - startMs),
   };
 
+  let far = false;
   return {
     group,
     /** The whole per-frame cost: one uniform write. */
     setSim(sim) { uniforms.uSim.value = sim; },
+    /**
+     * Chooses the full or the far-view slabs from how big one world unit is on screen (device
+     * pixels per unit at the panel's centre). O(1): it swaps an index buffer, at most once per
+     * crossing. Returns true while the far-view slabs are drawn.
+     */
+    setDetail(pxPerUnit) {
+      const bevelPx = bevel * pxPerUnit;
+      const want = far ? bevelPx < DETAIL.NEAR_ABOVE_PX : bevelPx < DETAIL.FAR_BELOW_PX;
+      if (want !== far) {
+        far = want;
+        for (const d of details) d.mesh.geometry = far ? d.far : d.full;
+      }
+      return far;
+    },
     stats,
     uniforms,
     materials: { glaze: glazeMaterial, gold: goldMaterial, depth: depthMaterial },
     meshes,
     dispose() {
-      for (const mesh of meshes) mesh.geometry.dispose();
+      for (const d of details) { d.full.dispose(); d.far.dispose(); }
       glazeMaterial.dispose(); goldMaterial.dispose(); depthMaterial.dispose();
       texture.dispose();
     },
@@ -255,6 +314,8 @@ export function createZelligeTiles(scene, pieceList, { envMap, rand = stream('pi
   return {
     ...makeTileSystem(schedule, pieces),
     stats: pieces.stats,
+    group: pieces.group,   // the meshes (e.g. to precompile their shader before showing them)
+    schedule,   // the pieces in laying order with their start times (e.g. for the HUD's labels)
     dispose() { scene.remove(pieces.group); pieces.dispose(); },
   };
 }
@@ -280,6 +341,8 @@ export function makeTileSystem(schedule, pieces) {
     landedAt: schedule.landedAt,
     stageAt: schedule.stageAt,
     rLaidAt: schedule.rLaidAt,
+    rCoveredAt: schedule.rCoveredAt,   // radius inside which everything has landed (the bed hides its underdrawing there)
+    setDetail: pieces.setDetail,       // full or far-view slabs (see DETAIL)
     // All piece state is a function of sim, so there is nothing to clear: back to "none started".
     reset() { pieces.setSim(0); },
   };

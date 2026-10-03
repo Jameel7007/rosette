@@ -6,7 +6,10 @@
 //   moorish-full.png     the whole medallion (view r ≤ 31, 1600 px) inside a ring of stand-in
 //                        field colour, finished tiles (grout gaps and wobble) on mortar
 //   moorish-centre.png   the opening close-up, |x|, |y| ≤ 4 (1200 px)
+//   moorish-bows.png     close-up of the two bows above the centre (on the dent axes at 78.75°
+//                        and 101.25°), each split by its gold dart into two lobes (1400 px)
 //   moorish-sinopia.png  (with --sinopia) the construction lines over the exact pieces
+// and prints piece counts per kind, the share of gold, and any cut warnings.
 // --field uses the real 8-fold field (src/pattern/hankin.js) outside the medallion instead of
 // the stand-in ring, if that module is available.
 import { mkdirSync } from 'fs';
@@ -37,7 +40,6 @@ if (flag('field')) {
     const { buildArrangement } = await import('../src/pattern/graph.js');
     const { strapwork } = await import('../src/pattern/strap.js');
     const { clipPieces } = await import('../src/pattern/cut.js');
-    const { circlePoly } = await import('../src/pattern/geom.js');
     const field = buildField({ bounds: { halfW: 34, halfH: 34 } });
     const arr = buildArrangement(field.segments);
     const sw = strapwork(arr, { width: field.strap, targetLen: 1.35 });
@@ -46,7 +48,8 @@ if (flag('field')) {
       ...sw.straps.map(s => ({ poly: s.poly, key: 'K' })),
     ];
     const square = [[-33, -33], [33, -33], [33, 33], [-33, 33]];
-    const clipped = clipPieces(raw, { inside: square, outside: circlePoly(ros.R_F, ros.geo.G) });
+    // The field is clipped with the medallion's own outer polygon (see moorish.js, "For a composer").
+    const clipped = clipPieces(raw, { inside: square, outside: ros.outerPoly });
     outside = finishPieces(clipped, { grout: PIECE.GROUT, wobble: PIECE.WOBBLE, rand: stream('field-preview') });
   } catch (e) {
     console.warn('field unavailable, using the stand-in ring:', e.message);
@@ -64,8 +67,10 @@ if (!outside.length) {
 const tiles = [...outside, ...res.tiles];
 const full = resolve(outDir, 'moorish-full.png');
 const centre = resolve(outDir, 'moorish-centre.png');
+const bows = resolve(outDir, 'moorish-bows.png');
 await renderSVG(piecesToSVG(tiles, { view: [-31, -31, 31, 31], px: 1600 }), full);
 await renderSVG(piecesToSVG(res.tiles, { view: [-4, -4, 4, 4], px: 1200 }), centre);
+await renderSVG(piecesToSVG(res.tiles, { view: [-9, 8.5, 9, 21.5], px: 1400 }), bows);
 if (flag('sinopia')) {
   // The underdrawing on bare mortar, with the exact pieces as faint outlines.
   const ghost = res.exact.map(p => ({ poly: p.poly, fill: '#c9c0b1' }));
@@ -81,5 +86,13 @@ for (const [k, v] of Object.entries(kinds)) {
   v.sort((a, b) => a - b);
   console.log(`  ${k.padEnd(8)} ${String(v.length).padStart(5)}  area min ${v[0].toFixed(3)}  median ${v[v.length >> 1].toFixed(3)}  max ${v[v.length - 1].toFixed(3)}`);
 }
-if (res.warnings.length) console.log('warnings:', res.warnings.map(w => `${w.code}: ${w.msg}`).join('\n  '));
-console.log(`→ ${full}\n→ ${centre}`);
+// Gold is the accent (khatem, gold frame ring, the bows' darts): the owner's limit is about 6 %.
+const share = (list, key) => {
+  let k = 0, all = 0;
+  for (const p of list) { const a = area(p.poly); all += a; if (p.key === key) k += a; }
+  return (100 * k) / all;
+};
+const darts = res.tiles.filter(p => p.sub === 'dart');
+console.log(`gold: ${share(res.tiles, 'A').toFixed(2)} % of the tiles' area (${share(res.exact, 'A').toFixed(2)} % before grout); ${darts.length} darts of ${(darts.reduce((s, p) => s + area(p.poly), 0) / (darts.length || 1)).toFixed(3)} each`);
+console.log(res.warnings.length ? `warnings:\n  ${res.warnings.map(w => `${w.code}: ${w.msg}`).join('\n  ')}` : 'warnings: none');
+console.log(`→ ${full}\n→ ${centre}\n→ ${bows}`);

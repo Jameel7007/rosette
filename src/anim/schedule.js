@@ -39,6 +39,14 @@ export function makeSchedule(pieces, { T_START, T_SPAN, P_EXP, D }) {
     rMaxUpTo[i] = running;
   }
 
+  // Suffix minimum of each piece's inner radius (its closest point to the centre):
+  // rInFrom[i] = min over pieces i..N-1. Once the first k pieces have landed, everything
+  // closer to the centre than rInFrom[k] is covered (the bed uses it to hide its underdrawing
+  // under laid pieces).
+  const rInFrom = new Float64Array(N + 1);
+  rInFrom[N] = Infinity;
+  for (let i = N - 1; i >= 0; i--) rInFrom[i] = Math.min(rInFrom[i + 1], innerRadius(sorted[i]));
+
   /**
    * Count of indices i with predicate(i) true, for a predicate that is true on a prefix
    * (true, true, ..., false, false). Classic upper-bound binary search: O(log N).
@@ -70,7 +78,29 @@ export function makeSchedule(pieces, { T_START, T_SPAN, P_EXP, D }) {
     return n ? rMaxUpTo[n - 1] : 0;
   };
 
-  return { pieces: sorted, t0, N, D, T_END, startedAt, landedAt, stageAt, rLaidAt };
+  /** Radius inside which every piece has landed: 0 before the first, Infinity after the last. */
+  const rCoveredAt = sim => rInFrom[landedAt(sim)];
+
+  return { pieces: sorted, t0, N, D, T_END, startedAt, landedAt, stageAt, rLaidAt, rCoveredAt };
+}
+
+/**
+ * Distance from the centre to the nearest point of a piece: 0 if the piece covers the centre,
+ * else the shortest distance to one of its edges. Pieces without an outline use `rc`.
+ */
+function innerRadius(piece) {
+  const poly = piece.poly;
+  if (!poly || poly.length < 3) return piece.rc ?? 0;
+  let inside = false, best = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [ax, ay] = poly[i], [bx, by] = poly[j];
+    if ((ay > 0) !== (by > 0) && 0 < (bx - ax) * (0 - ay) / (by - ay) + ax) inside = !inside;
+    // distance from the origin to segment a-b
+    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+    const t = len2 ? Math.min(1, Math.max(0, -(ax * dx + ay * dy) / len2)) : 0;
+    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+  }
+  return inside ? 0 : best;
 }
 
 /**

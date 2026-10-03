@@ -25,7 +25,8 @@ export const RENDER = {
   ENERGY_COMP: 1.05,
   SHADOW: {
     MAP: 2048,
-    BIAS: -0.0006,
+    // shadow.bias, near and far are not set here: anim/light.js fitShadow fits them every
+    // frame to the area on screen (the prototype's fixed bias detached shadows from pieces).
     NORMAL_BIAS: 0.03,
     // r128's PCFSoftShadowMap filtered over a 3×3-texel box (std ≈ 0.87 texel). r186's
     // PCFShadowMap takes 5 hardware-filtered taps on a disk of this radius (in texels);
@@ -33,6 +34,23 @@ export const RENDER = {
     RADIUS: 1.6,
   },
 };
+
+/**
+ * How many pixels to draw. The cost of a frame is mostly per pixel (4× multisampled edges of
+ * ten thousand bevelled pieces), so the drawing buffer's size is the lever:
+ *   - never more than 2 device pixels per CSS pixel (as before), and
+ *   - never more than MAX_PIXELS in all: a 1920×1080 window on a 2× screen asked for 8.3 Mpx
+ *     and held only 49-54 fps on an M2 Pro; capped to 5 Mpx (ratio 1.55) it measured ~11 ms.
+ * Below that ceiling, main.js's governor (scene/governor.js) steps the ratio down on machines
+ * that still cannot keep up.
+ */
+export const QUALITY = { MAX_RATIO: 2, MAX_PIXELS: 5e6 };
+
+/** The pixel ratio to start from (the ceiling) for a w × h CSS-pixel window on a `dpr` screen. */
+export function pixelRatioCeiling(dpr, w, h) {
+  const fit = Math.sqrt(QUALITY.MAX_PIXELS / Math.max(1, w * h));
+  return Math.min(dpr || 1, QUALITY.MAX_RATIO, Math.max(1, fit));
+}
 
 /**
  * A hex number read the way r128 read it: the digits taken directly as linear RGB, with no
@@ -97,7 +115,7 @@ export function createRenderer(canvas) {
   } catch (e) {
     return null;
   }
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(pixelRatioCeiling(window.devicePixelRatio, window.innerWidth, window.innerHeight));
   renderer.outputColorSpace = THREE.SRGBColorSpace;  // the default; stated because the look depends on it
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = RENDER.EXPOSURE;
@@ -129,15 +147,14 @@ export function createRenderer(canvas) {
   const sun = new THREE.DirectionalLight(rawHex(0xfff0d6), 1.9 * Math.PI * RENDER.ENERGY_COMP);
   sun.castShadow = true;
   sun.shadow.mapSize.set(RENDER.SHADOW.MAP, RENDER.SHADOW.MAP);
-  sun.shadow.bias = RENDER.SHADOW.BIAS;
   sun.shadow.normalBias = RENDER.SHADOW.NORMAL_BIAS;
   sun.shadow.radius = RENDER.SHADOW.RADIUS;
-  sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 320;
   scene.add(sun, sun.target);
 
-  function resize() {
+  /** Fits the drawing buffer to the window at pixel ratio `ratio` (default: keep the current one). */
+  function resize(ratio = renderer.getPixelRatio()) {
     const w = window.innerWidth, h = window.innerHeight;
+    renderer.setPixelRatio(ratio);
     renderer.setSize(w, h, false);  // false: CSS (#c, inset 0) sizes the canvas element
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -154,5 +171,23 @@ export function createRenderer(canvas) {
     scene.fog.far = RENDER.FOG.far * scale;
   }
 
-  return { renderer, scene, camera, envMap, sun, hemi, resize, fitFog };
+  const stage = { renderer, scene, camera, envMap, sun, hemi, resize, fitFog };
+
+  // After a lost WebGL context comes back (a phone reclaiming a background tab's GPU memory),
+  // three re-uploads every buffer and texture it still has the data for. The reflection
+  // environment is different: it was rendered ON the GPU, so its pixels are simply gone, and
+  // the gold went black. Bake it again and hand it to every material that used the old one.
+  // (three's own restore handler was registered first, in the WebGLRenderer constructor, so
+  // the renderer is working again when this runs.)
+  canvas.addEventListener('webglcontextrestored', () => {
+    const old = stage.envMap, fresh = createEnvironment(renderer);
+    scene.environment = fresh;
+    scene.traverse(o => {
+      for (const m of [].concat(o.material ?? [])) if (m.envMap === old) m.envMap = fresh;
+    });
+    stage.envMap = fresh;   // what pieces built from now on use
+    renderer.shadowMap.needsUpdate = true;   // its depth map was lost too
+  });
+
+  return stage;
 }

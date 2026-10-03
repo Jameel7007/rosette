@@ -3,8 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
-import { buildRosette, cutRosette, fold, splitByLine, STAGES } from '../src/pattern/rosette16/moorish.js';
-import { area, centroid, isSimple, pointInPolygon, dist, orient } from '../src/pattern/geom.js';
+import { buildRosette, cutRosette, fold, splitByLine, fallbackCut, clipToConvex, STAGES, MOORISH } from '../src/pattern/rosette16/moorish.js';
+import { area, centroid, isSimple, pointInPolygon, dist, orient, circlePoly } from '../src/pattern/geom.js';
 import { checkPartition } from '../src/pattern/cut.js';
 import { PAL } from '../src/pattern/palette.js';
 import { MEDALLION } from '../src/config.js';
@@ -173,9 +173,17 @@ test('pieces: count, sizes, palette, and gold used sparingly', () => {
     total += a;
     if (p.key === 'A') gold += a;
   }
-  // Exact (uncut-for-grout) pieces stay near the target size; strap pieces are long and thin.
-  for (const p of res.exact) if (p.kind !== 'strap') assert.ok(area(p.poly) <= 3.3, `${p.kind} piece of area ${area(p.poly)}`);
-  assert.ok(gold / total < 0.08, `gold covers ${(100 * gold / total).toFixed(1)}%`);
+  // Gold is the accent: the khatem, the gold frame ring and the bows' 16 darts. The owner's limit
+  // is about 6 % of the medallion (5.2 % before the darts, 5.96 % with them).
+  assert.ok(gold / total < 0.06, `gold covers ${(100 * gold / total).toFixed(2)}%`);
+});
+
+test('cutting: no fill piece larger than MOORISH.maxArea survives', () => {
+  // Every fill (straps and bands are cut by length, not area) is at most maxArea before grout.
+  const fills = res.exact.filter(p => p.kind !== 'strap' && p.kind !== 'band');
+  const worst = fills.reduce((m, p) => (area(p.poly) > area(m.poly) ? p : m));
+  assert.ok(area(worst.poly) <= MOORISH.maxArea * (1 + 1e-9), `${worst.kind} piece of area ${area(worst.poly)}`);
+  assert.equal(ros.opts.maxArea, MOORISH.maxArea);
 });
 
 test('determinism and options', () => {
@@ -198,4 +206,173 @@ test('splitByLine halves a symmetric piece exactly', () => {
 test('src/pattern stays free of three.js', () => {
   const src = readFileSync(new URL('../src/pattern/rosette16/moorish.js', import.meta.url), 'utf8');
   assert.ok(!/from\s+['"]three/.test(src));
+});
+
+// ---------------------------------------------------------------------------------------
+// The bows: the owner's one change (no more valentine hearts)
+// ---------------------------------------------------------------------------------------
+
+/** Unit direction of the dent axis (k·22.5° + 11.25°) nearest to point c. */
+function dentAxis(c) {
+  const a = Math.round((Math.atan2(c[1], c[0]) / DEG - 11.25) / 22.5) * 22.5 + 11.25;
+  return [Math.cos(a * DEG), Math.sin(a * DEG)];
+}
+const sideOf = (p, u) => u[0] * p[1] - u[1] * p[0];      // > 0: counter-clockwise of the axis
+const along = (p, u) => p[0] * u[0] + p[1] * u[1];
+const mirrorIn = (p, u) => { const k = 2 * along(p, u); return [k * u[0] - p[0], k * u[1] - p[1]]; };
+
+test('bows: a gold dart on each dent axis splits the bow into two mirror-image lobes', () => {
+  const bowFaces = new Map();
+  for (const p of res.exact) if (p.kind === 'bow') (bowFaces.get(p.faceId) ?? bowFaces.set(p.faceId, []).get(p.faceId)).push(p);
+  assert.equal(bowFaces.size, 16);
+  for (const pieces of bowFaces.values()) {
+    const darts = pieces.filter(p => p.sub === 'dart');
+    assert.equal(darts.length, 1, 'one dart per bow');
+    const [dart] = darts;
+    assert.equal(dart.key, 'A', 'the dart is gold');
+    const u = dentAxis(centroid(dart.poly));
+    const tol = 1e-9 * 20;
+    // The dart: tip and far end on the dent axis, the two shoulders mirror images of each other.
+    const onAxis = dart.poly.filter(p => Math.abs(sideOf(p, u)) < tol);
+    const off = dart.poly.filter(p => Math.abs(sideOf(p, u)) >= tol);
+    assert.equal(onAxis.length, 2, 'tip and notch on the axis');
+    assert.equal(off.length, 2);
+    assert.ok(dist(mirrorIn(off[0], u), off[1]) < tol, 'the shoulders mirror each other');
+    // It holds the neck: nothing else of the bow reaches below the shoulders (the waist).
+    const waist = along(off[0], u);
+    const tip = Math.min(...onAxis.map(p => along(p, u)));
+    assert.ok(tip < waist - 1, 'the dart reaches down into the neck');
+    for (const p of pieces) if (p !== dart) for (const q of p.poly) assert.ok(along(q, u) >= waist - tol, 'no neck piece left below the waist');
+    // It reaches up to the notch, so the two lobes do not touch: every other piece lies on one
+    // side of the axis.
+    const notch = Math.max(...onAxis.map(p => along(p, u)));
+    const top = Math.max(...pieces.flatMap(p => p.poly.filter(q => Math.abs(sideOf(q, u)) < tol).map(q => along(q, u))));
+    assert.ok(Math.abs(notch - top) < tol, 'the dart ends at the notch, the bow\'s last point on its axis');
+    const lobes = [0, 0];
+    for (const p of pieces) {
+      if (p === dart) continue;
+      const s = p.poly.map(q => sideOf(q, u));
+      assert.ok(s.every(v => v > -tol) || s.every(v => v < tol), 'a lobe piece crosses the axis');
+      lobes[s.some(v => v > tol) ? 1 : 0] += area(p.poly);
+    }
+    assert.ok(Math.abs(lobes[0] - lobes[1]) < 1e-9, 'the two lobes are the same size');
+    // The second lobe is cut as the mirror image of the first (same pieces, same colours).
+    const cents = pieces.map(p => centroid(p.poly));
+    const cs = pointSet(cents);
+    const byCentroid = new Map(cents.map((c, i) => [c, pieces[i]]));
+    for (const p of pieces) {
+      const hit = cs(mirrorIn(centroid(p.poly), u));
+      assert.ok(hit, 'every bow piece has a mirror image in its bow');
+      const q = byCentroid.get(hit);
+      assert.equal(q.key, p.key);
+      assert.ok(Math.abs(area(q.poly) - area(p.poly)) < 1e-9);
+    }
+    // Each lobe: an outline band in the bow's glaze around an inlay in the second glaze.
+    const keys = new Set(pieces.filter(p => p !== dart).map(p => p.key));
+    assert.deepEqual([...keys].sort(), ['O', 'W']);
+  }
+  // No fragile slivers left in the bows once grouted (the old neck tile was 0.16).
+  const bowTiles = res.tiles.filter(p => p.kind === 'bow');
+  const smallest = Math.min(...bowTiles.map(p => area(p.poly)));
+  assert.ok(smallest > 0.3, `smallest bow tile ${smallest.toFixed(3)}`);
+});
+
+// ---------------------------------------------------------------------------------------
+// Loud cut failures and the exact fallback
+// ---------------------------------------------------------------------------------------
+
+/** The bow, the central star and a comb: non-convex regions for the fallback. */
+const fillOf = kind => res.sw.fills.find(f => ros.classify(res.arr.faces[f.faceId]).kind === kind).poly;
+const comb = [[0, 0], [6, 0], [6, 3], [5, 3], [5, 1], [4, 1], [4, 3], [3, 3], [3, 1], [2, 1], [2, 3], [1, 3], [1, 1], [0, 1]];
+
+const isConvex = poly => poly.every((p, i) => orient(poly[(i + poly.length - 1) % poly.length], p, poly[(i + 1) % poly.length]) >= -1e-9);
+
+test('fallbackCut: exact, convex pieces no larger than maxArea, without polygon-clipping', () => {
+  for (const [name, poly] of [['bow', fillOf('bow')], ['star16', fillOf('star16')], ['petal', fillOf('petal')], ['comb', comb]]) {
+    for (const maxArea of [MOORISH.maxArea, 0.7]) {
+      const parts = fallbackCut(poly, maxArea);
+      const chk = checkPartition(parts, area(poly));
+      assert.ok(chk.ok, `${name}: not an exact partition ${JSON.stringify({ rel: chk.relError, ov: chk.overlaps.length, bad: chk.invalid.length })}`);
+      for (const p of parts) {
+        assert.ok(isConvex(p), `${name}: a non-convex piece`);
+        assert.ok(area(p) <= maxArea * (1 + 1e-9), `${name}: piece of ${area(p)} > ${maxArea}`);
+      }
+    }
+  }
+});
+
+test('clipToConvex: the exact disk clip used when polygon-clipping fails', () => {
+  // A comb half outside a square: what is left is the part inside, exactly.
+  const square = [[-1, -1], [3.5, -1], [3.5, 5], [-1, 5]];
+  const parts = clipToConvex(comb, square);
+  const inside = 3.5 * 1 + 2 + 1;   // the spine up to x = 3.5, the tooth at x 1..2, half the one at 3..4
+  assert.ok(Math.abs(parts.reduce((s, p) => s + area(p), 0) - inside) < 1e-12);
+  for (const p of parts) for (const q of p) assert.ok(q[0] <= 3.5 + 1e-12);
+  assert.ok(checkPartition(parts, inside).ok);
+  // A real piece against the disk polygon.
+  const disk = circlePoly(ros.R_M, ros.geo.G);
+  const star8 = fillOf('star8');
+  const moved = star8.map(p => [p[0] * 1.2, p[1] * 1.2]);   // pushed out across the disk edge
+  const kept = clipToConvex(moved, disk);
+  for (const p of kept) for (const q of p) assert.ok(Math.hypot(...q) <= ros.R_M + 1e-9);
+  assert.ok(kept.length > 0 && checkPartition(kept, kept.reduce((s, p) => s + area(p), 0)).ok);
+});
+
+test('cut failures are loud: reported in the warnings and cut by the exact fallback', () => {
+  // Break the cuts of a convex class (kites) and a non-convex one (bows); make the candies'
+  // cut lose area, which is just as wrong as throwing.
+  const broken = {
+    ...ros,
+    classify(face) {
+      const c = ros.classify(face);
+      if (c.kind === 'kite' || c.kind === 'bow') return { ...c, cut: () => { throw new Error('test: cut failed'); } };
+      if (c.kind === 'candy') return { ...c, cut: poly => [poly.slice(0, 3)] };
+      return c;
+    },
+  };
+  const r = cutRosette(broken);
+  const w = r.warnings.filter(x => x.code === 'cut-fallback');
+  assert.equal(w.length, 1, JSON.stringify(r.warnings.map(x => x.code)));
+  assert.equal(w[0].count, 16 + 16 + 32, w[0].msg);
+  assert.equal(w[0].at.length, w[0].count);
+  assert.match(w[0].msg, /test: cut failed/);
+  assert.match(w[0].msg, /cover/);
+  assert.ok(!r.warnings.some(x => x.code === 'oversize'));
+  // Nothing was left whole: every region is cut, every fill ≤ maxArea, and the medallion is
+  // still an exact partition.
+  for (const p of r.exact) if (p.kind !== 'strap' && p.kind !== 'band') assert.ok(area(p.poly) <= MOORISH.maxArea * (1 + 1e-9));
+  const chk = checkPartition(r.exact, ros.outerPoly);
+  assert.ok(chk.ok, JSON.stringify({ rel: chk.relError, ov: chk.overlaps.length, bad: chk.invalid.length }));
+  // A cut that leaves a piece too big is reported as well.
+  const lazy = { ...ros, classify: f => { const c = ros.classify(f); return c.kind === 'petal' ? { ...c, cut: poly => [poly] } : c; } };
+  const big = cutRosette(lazy).warnings.find(x => x.code === 'oversize');
+  assert.ok(big && big.count === 16 && /petal/.test(big.msg));
+});
+
+// ---------------------------------------------------------------------------------------
+// Laying order inside a region
+// ---------------------------------------------------------------------------------------
+
+test('laying order: a region\'s pieces go down from the inside out', () => {
+  const faceLayer = new Map(res.arr.faces.map(f => [f.id, ros.classify(f).layer]));
+  const byFace = new Map();
+  for (const p of res.exact) if (p.faceId !== undefined && p.kind !== 'star16') (byFace.get(p.faceId) ?? byFace.set(p.faceId, []).get(p.faceId)).push(p);
+  for (const [id, pieces] of byFace) {
+    const L = faceLayer.get(id);
+    const sorted = pieces.map(p => ({ p, r: radius(centroid(p.poly)) })).sort((a, b) => a.r - b.r);
+    assert.equal(sorted[0].p.layer, L, 'the innermost piece starts the region');
+    if (sorted.length > 1) assert.ok(Math.abs(sorted[sorted.length - 1].p.layer - (L + 0.9)) < 1e-6, 'the outermost piece ends it');
+    for (let i = 1; i < sorted.length; i++) assert.ok(sorted[i].p.layer >= sorted[i - 1].p.layer, 'layers grow outward');
+    for (const { p } of sorted) assert.ok(p.layer >= L && p.layer <= L + 0.9 + 1e-9);
+  }
+  // The centre inlay keeps the layers the design gave it: khatem, ring of 8, ring of 16, points.
+  const star = res.exact.filter(p => p.kind === 'star16');
+  assert.deepEqual([...new Set(star.map(p => p.layer))].sort(), [0, 1, 2, 3]);
+  // Straps and bands keep whole layers; a strap has the layer of the later region it bounds.
+  for (const p of res.exact) if (p.kind === 'strap' || p.kind === 'band') assert.ok(Number.isInteger(p.layer));
+  // Copies of a piece under the symmetry get exactly the same layer, so a composer can sort by
+  // (layer, angle) and sweep around each ring: every layer value is shared by a multiple of 16.
+  const count = new Map();
+  for (const p of res.exact) if (p.kind !== 'star16' && p.kind !== 'strap' && p.kind !== 'band') count.set(p.layer, (count.get(p.layer) ?? 0) + 1);
+  for (const [layer, n] of count) assert.equal(n % 16, 0, `layer ${layer} has ${n} pieces`);
 });

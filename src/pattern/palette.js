@@ -6,10 +6,19 @@ export const PAL = {
   B: '#1a3473', // lapis blue
   T: '#1b716e', // turquoise
   G: '#29583f', // green
-  O: '#b98128', // ochre
+  O: '#a8721f', // ochre (honey: darker than the gold, so the metal reads as metal; the prototype's was #b98128)
   R: '#8e3f2b', // terracotta
   A: '#d3a64e', // gold (rendered metallic)
 };
+
+/**
+ * The prototype's palette, frozen: the ?legacy=1 build (legacy/tiles.js) is a faithful
+ * reference of the prototype's picture, so it keeps these even when PAL above is retuned.
+ */
+export const PROTOTYPE_PAL = Object.freeze({
+  W: '#e4d9c2', K: '#1f1a19', B: '#1a3473', T: '#1b716e',
+  G: '#29583f', O: '#b98128', R: '#8e3f2b', A: '#d3a64e',
+});
 
 /** Keys rendered with the metallic material. */
 export const METAL = new Set(['A']);

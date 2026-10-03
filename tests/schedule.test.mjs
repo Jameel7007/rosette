@@ -131,3 +131,21 @@ test('dropPhase is the prototype pose curve', () => {
   const before = dropPhase(0.8 - 1e-9, DROP), after = dropPhase(0.8, DROP);
   assert.ok(Math.abs(before.y - after.y) < 1e-6 && Math.abs(before.f - after.f) < 1e-6);
 });
+
+test('rCoveredAt: the radius inside which every piece has landed', () => {
+  // Rings of square pieces laid outward, then one late piece near the centre
+  const sq = (cx, cy, h = 0.4) => [[cx - h, cy - h], [cx + h, cy - h], [cx + h, cy + h], [cx - h, cy + h]];
+  const pieces = [
+    { seq: 0, r: 0.6, poly: sq(0, 0) },           // covers the centre: inner radius 0
+    { seq: 1, r: 3.6, poly: sq(3, 0) },           // inner radius 2.6
+    { seq: 2, r: 6.6, poly: sq(0, 6) },           // inner radius 5.6
+    { seq: 3, r: 2.6, poly: sq(-2, 0) },          // laid late, but nearer: inner radius 1.6
+  ];
+  const s = makeSchedule(pieces, TIMING);
+  const landed = k => (k === 0 ? 0 : s.t0[k - 1] + s.D + 1e-6);   // sim right after k pieces landed
+  assert.equal(s.rCoveredAt(0), 0);
+  assert.ok(Math.abs(s.rCoveredAt(landed(1)) - 1.6) < 1e-9, 'the late inner piece holds the covered radius back');
+  assert.ok(Math.abs(s.rCoveredAt(landed(3)) - 1.6) < 1e-9);
+  assert.equal(s.rCoveredAt(landed(4)), Infinity, 'all landed');
+  assert.equal(makeSchedule([], TIMING).rCoveredAt(5), Infinity);
+});

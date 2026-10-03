@@ -13,7 +13,7 @@ import { rawHex } from '../src/scene/renderer.js';
 import { createCameraRig, FRAMING, portraitFactor } from '../src/anim/camera.js';
 import { createLightRig, SUN } from '../src/anim/light.js';
 import { mulberry, SEED } from '../src/util/rand.js';
-import { PAL } from '../src/pattern/palette.js';
+import { PROTOTYPE_PAL as PAL } from '../src/pattern/palette.js';
 
 const TAU = Math.PI * 2;
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;

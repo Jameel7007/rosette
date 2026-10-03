@@ -465,3 +465,150 @@ function interiorsOverlap(A, B, eps) {
   // 3. Nested or identical shapes: an interior point of one inside the other.
   return strictlyIn(interiorPoint(A), B) || strictlyIn(interiorPoint(B), A);
 }
+
+// ---------------------------------------------------------------------------------------
+// Merging (added for compose.js)
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Length of boundary two polygons share: the total overlap of their collinear sides (within
+ * `tol`) that run in opposite directions, as the sides of two neighbours in a partition do.
+ * The shared sides need not have matching vertices: one can be split where the other is not.
+ * @param {Poly} A
+ * @param {Poly} B
+ * @param {number} [tol=1e-7] how far a side's ends may sit off the other side's line
+ * @returns {number}
+ */
+export function sharedLength(A, B, tol = 1e-7) {
+  let total = 0;
+  for (let i = 0; i < A.length; i++) {
+    const a = A[i], b = A[(i + 1) % A.length];
+    const L = dist(a, b);
+    if (!(L > 0)) continue;
+    const ux = (b[0] - a[0]) / L, uy = (b[1] - a[1]) / L;
+    for (let j = 0; j < B.length; j++) {
+      const c = B[j], d = B[(j + 1) % B.length];
+      // Both ends of B's side on A's side's line ...
+      if (Math.abs((c[0] - a[0]) * uy - (c[1] - a[1]) * ux) > tol) continue;
+      if (Math.abs((d[0] - a[0]) * uy - (d[1] - a[1]) * ux) > tol) continue;
+      // ... running the other way, and overlapping it.
+      const tc = (c[0] - a[0]) * ux + (c[1] - a[1]) * uy;
+      const td = (d[0] - a[0]) * ux + (d[1] - a[1]) * uy;
+      if (td >= tc) continue;
+      const lo = Math.max(0, td), hi = Math.min(L, tc);
+      if (hi > lo) total += hi - lo;
+    }
+  }
+  return total;
+}
+
+/**
+ * Merge pieces into their neighbours without breaking the partition: each selected piece is
+ * united (polygon-clipping union) with the neighbour it shares the most boundary with, and
+ * the neighbour keeps its own metadata (key, stage, ...). A craftsman does the same with a
+ * sliver: he cuts the piece next to it a little bigger instead of setting a crumb.
+ *
+ * `rank` says which neighbours to prefer: among the neighbours whose shared side is at least
+ * `minShare` times the longest one, the highest rank wins (then the longest side). So a
+ * preferred neighbour wins only if the sliver really lies against it. Rank -Infinity means
+ * "never merge into this one".
+ *
+ * Selected pieces are visited smallest first, and a piece is skipped if it no longer matches
+ * `select` by the time it is visited (it may have grown by absorbing a smaller one).
+ *
+ * @param {PieceLike[]} pieces  all pieces of the partition (not modified)
+ * @param {object} opts
+ * @param {(p: PieceLike) => boolean} opts.select     which pieces to merge away
+ * @param {(small: PieceLike, cand: PieceLike) => number} [opts.rank]  default: all equal
+ * @param {number} [opts.minShare=0.5]
+ * @param {number} [opts.tol=1e-7]    collinearity tolerance for shared sides
+ * @returns {{ pieces: PieceLike[], merged: {piece: PieceLike, into: PieceLike, shared: number}[],
+ *   failed: PieceLike[] }}  `pieces`: the new list (merged neighbours are new objects, every
+ *   other piece is passed through as is); `failed`: selected pieces no neighbour could take
+ */
+export function absorbPieces(pieces, { select, rank = () => 0, minShare = 0.5, tol = 1e-7 } = {}) {
+  const live = pieces.slice();
+  const boxes = live.map(p => bbox(p.poly));
+  // Spatial grid on bounding boxes, so each sliver only looks at the pieces around it.
+  const sizes = boxes.map(b => Math.max(b[2] - b[0], b[3] - b[1])).sort((a, b) => a - b);
+  const cell = Math.max(sizes[sizes.length >> 1] || 1, 1e-6) * 2;
+  const grid = new Map();
+  const cellsOf = (b, f) => {
+    for (let cx = Math.floor((b[0] - tol) / cell); cx <= Math.floor((b[2] + tol) / cell); cx++) {
+      for (let cy = Math.floor((b[1] - tol) / cell); cy <= Math.floor((b[3] + tol) / cell); cy++) f(`${cx},${cy}`);
+    }
+  };
+  const addToGrid = i => cellsOf(boxes[i], k => { const l = grid.get(k); if (l) l.push(i); else grid.set(k, [i]); });
+  live.forEach((_, i) => addToGrid(i));
+
+  const merged = [], failed = [];
+  const queue = live.map((p, i) => i).filter(i => select(live[i])).sort((i, j) => area(live[i].poly) - area(live[j].poly));
+  for (const i of queue) {
+    const small = live[i];
+    if (!small || !select(small)) continue;
+    const near = new Set();
+    cellsOf(boxes[i], k => { for (const j of grid.get(k) ?? []) if (j !== i && live[j]) near.add(j); });
+    const cands = [];
+    for (const j of near) {
+      const b = boxes[j], a = boxes[i];
+      if (b[0] > a[2] + tol || a[0] > b[2] + tol || b[1] > a[3] + tol || a[1] > b[3] + tol) continue;
+      const shared = sharedLength(small.poly, live[j].poly, tol);
+      if (shared > 10 * tol && rank(small, live[j]) > -Infinity) cands.push({ j, shared, rank: rank(small, live[j]) });
+    }
+    if (!cands.length) { failed.push(small); continue; }
+    const longest = Math.max(...cands.map(c => c.shared));
+    cands.sort((p, q) => {
+      const pe = p.shared >= minShare * longest, qe = q.shared >= minShare * longest;
+      if (pe !== qe) return pe ? -1 : 1;
+      return (pe && q.rank - p.rank) || q.shared - p.shared;
+    });
+    let done = false;
+    for (const c of cands) {
+      const poly = unionTwo(small.poly, live[c.j].poly);
+      if (!poly) continue;
+      const into = live[c.j];
+      live[c.j] = { ...into, poly };
+      live[i] = null;
+      boxes[c.j] = bbox(poly);
+      addToGrid(c.j);
+      merged.push({ piece: small, into, shared: c.shared });
+      done = true;
+      break;
+    }
+    if (!done) failed.push(small);
+  }
+  return { pieces: live.filter(Boolean), merged, failed };
+}
+
+/** Union of two neighbouring polygons as one simple polygon, or null if it is not one. */
+function unionTwo(A, B) {
+  let res;
+  try { res = pc.union([A], [B]); } catch { return null; }
+  if (res.length !== 1 || res[0].length !== 1) return null;
+  const ring = removeSpikes(ensureCCW(dedupe(res[0][0].slice(0, -1))));
+  return ring.length >= 3 && isSimple(ring) ? ring : null;
+}
+
+/**
+ * Remove spikes: vertices where the outline runs out and straight back along itself. A union
+ * of two pieces whose shared side differs in the last bit leaves such a zero-width crack
+ * between them; it covers no area, but the mitred grout inset cannot handle it.
+ * @param {Poly} poly
+ * @param {number} [tol=1e-9] how far from a perfect reversal still counts (sine of the angle)
+ * @returns {Poly} a new array
+ */
+export function removeSpikes(poly, tol = 1e-9) {
+  let out = poly.slice();
+  for (let changed = true; changed && out.length > 3;) {
+    changed = false;
+    for (let i = 0; i < out.length && out.length > 3; i++) {
+      const n = out.length;
+      const a = out[(i - 1 + n) % n], b = out[i], c = out[(i + 1) % n];
+      const ux = b[0] - a[0], uy = b[1] - a[1], vx = c[0] - b[0], vy = c[1] - b[1];
+      const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+      if (!(lu > 0 && lv > 0)) { out.splice(i, 1); changed = true; i--; continue; }
+      if (ux * vx + uy * vy < 0 && Math.abs(ux * vy - uy * vx) <= tol * lu * lv) { out.splice(i, 1); changed = true; i--; }
+    }
+  }
+  return out;
+}

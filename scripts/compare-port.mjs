@@ -1,4 +1,4 @@
-// Compares the port (http://localhost:5193/) against the r128 prototype
+// Compares the port (http://localhost:5193/?legacy=1) against the r128 prototype
 // (/reference/prototype.html) frame for frame, then checks the port with real input.
 //
 //   node scripts/compare-port.mjs [base=http://localhost:5193] [--only compare|input|phone]
@@ -30,7 +30,8 @@ const OUT = 'capture/port';
 const W = 1280, H = 800;
 mkdirSync(OUT, { recursive: true });
 
-const PAGES = { proto: `${BASE}/reference/prototype.html`, port: `${BASE}/` };
+// '/' is the zellige app; the faithful port of the prototype lives at '/?legacy=1'
+const PAGES = { proto: `${BASE}/reference/prototype.html`, port: `${BASE}/?legacy=1` };
 
 // Checkpoints. `seek` jumps the sim clock, then `frames` frames run at 1/60 s, so the camera
 // has time to ease. T_END ≈ 47.45 s; the finale sweep starts 1.2 s later and lasts 11 s.

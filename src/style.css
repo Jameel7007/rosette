@@ -33,6 +33,6 @@ button:hover{background:rgba(243,236,224,.08)}
 button:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 button[aria-pressed="true"]{border-color:var(--gold);color:var(--gold)}
 .hint{font-size:10.5px;color:var(--ink-dim);letter-spacing:.06em;margin-top:8px}
-#err[hidden]{display:none}
+#err[hidden],.hud[hidden]{display:none}
 #err{position:fixed;inset:0;display:grid;place-items:center;padding:24px;text-align:center;font-family:var(--f-display);font-size:18px}
 @media (max-width:520px){.hint{display:none}.ctrls button{padding:6px 9px}}

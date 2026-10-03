@@ -14,7 +14,7 @@ export const TEXELS_PER_PIECE = 4;
 //   texel 0: t0, pivot x, pivot z, sink yb
 //   texel 1: tumble fx, tumble fz, spin, height scale sy
 //   texel 2: final tilt rx, final tilt rz, roughness, ripple seed
-//   texel 3: linear colour r, g, b, (unused)
+//   texel 3: linear colour r, g, b, facet gain (gold only, 0 for glaze: see lookVertex)
 
 // ------------------------------------------------------------------ vertex: shared by both materials
 
@@ -120,6 +120,7 @@ varying vec2 vRippleUV;     // rest-space (x, z) plus a per-piece offset: the ri
 varying float vTopMask;     // 1 on the top cap, fading to 0 down the bevel
 varying vec3 vTanX;         // view-space directions of the piece's own x and z axes,
 varying vec3 vTanZ;         //   so the ripple stays glued to the piece while it tumbles
+varying vec2 vFacet;        // extra slope of the top face (gold facets), in the piece's x and z
 `;
 
 /** Appended after <begin_vertex> in the standard material. */
@@ -127,7 +128,12 @@ export const lookVertex = /* glsl */ `
 	{
 		int lookId = int( pieceId + 0.5 );
 		vec4 look = pieceTexel( lookId, 2 );
-		vPieceColor = pieceTexel( lookId, 3 ).rgb;
+		vec4 tint = pieceTexel( lookId, 3 );
+		vPieceColor = tint.rgb;
+		// Gold facet: the top face is SHADED as if the piece leaned tint.a times further along
+		// its resting tilt (rx, rz). A tilt of rx about x leans the face toward +z, so its slope
+		// is (rz, -rx). Only the normal changes, not the slab (see PIECE_LOOK.FACET_GOLD).
+		vFacet = tint.a * vec2( look.y, - look.x );
 		vPieceRough = look.z;
 		vRippleUV = position.xz + vec2( 71.3, 37.9 ) * look.w;
 		vTopMask = smoothstep( 0.9, 0.98, normal.y );
@@ -148,6 +154,7 @@ varying vec2 vRippleUV;
 varying float vTopMask;
 varying vec3 vTanX;
 varying vec3 vTanZ;
+varying vec2 vFacet;
 
 // Integer hash (PCG-style) -> a pseudo-random gradient for each lattice point. Integer maths
 // keeps it stable for large coordinates (unlike fract(sin(...))), and taking the gradient
@@ -217,17 +224,17 @@ export const lookRoughnessFragment = /* glsl */ `
 `;
 
 /**
- * Appended after <normal_fragment_maps>: tilt the view-space normal by the glaze slope, on the
- * top cap only. vTanX / vTanZ are the piece's own axes in view space, so this is correct at any
- * tumble angle. Lighting reads `normal` after this point, so direct light and reflections both wobble.
+ * Appended after <normal_fragment_maps>: tilt the view-space normal by the glaze slope (ripple)
+ * plus the gold facet slope, on the top cap only. vTanX / vTanZ are the piece's own axes in view
+ * space, so this is correct at any tumble angle. Lighting reads `normal` after this point, so
+ * direct light and reflections both follow it.
  */
 export const lookNormalFragment = /* glsl */ `
 	{
 		float ripplePixelsPerUnit = 1.0 / max( length( fwidth( vRippleUV ) ), 1e-6 );
+		vec2 slope = vFacet * vTopMask;
 		float rippleAmount = uRipple * vTopMask;
-		if ( rippleAmount > 0.0 ) {
-			vec2 rippleS = rippleSlope( vRippleUV, ripplePixelsPerUnit ) * rippleAmount;
-			normal = normalize( normal - rippleS.x * normalize( vTanX ) - rippleS.y * normalize( vTanZ ) );
-		}
+		if ( rippleAmount > 0.0 ) slope += rippleSlope( vRippleUV, ripplePixelsPerUnit ) * rippleAmount;
+		if ( slope != vec2( 0.0 ) ) normal = normalize( normal - slope.x * normalize( vTanX ) - slope.y * normalize( vTanZ ) );
 	}
 `;

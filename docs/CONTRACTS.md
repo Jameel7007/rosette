@@ -33,7 +33,7 @@ into inset, slightly wobbled pieces, and animated by a vertex-shader drop.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `GROUT` | 0.14 | grout gap between pieces (each piece inset by `GROUT/2`) |
+| `GROUT` | 0.12 | grout gap between pieces (each piece inset by `GROUT/2`); was 0.14, narrowed so the straps read as ribbons |
 | `BEVEL` | 0.07 | bevel size on each piece's top edge |
 | `HEIGHT` | 0.38 | piece thickness before per-piece scale (prototype: 0.24 + 2×0.07) |
 | `WOBBLE` | 0.03 | max vertex jitter (hand-chipped edges), 0.02–0.04 |
@@ -169,7 +169,10 @@ createPieces(schedule, { envMap, rand }) → {
   sides, bottom) directly into merged, indexed buffers grouped by material. Vertices are
   stored at the piece's **final** world position. Attributes: `position`, `normal`, `pieceId`.
 - A float **data texture** holds per-piece data: `t0`, pivot (centroid), tumble
-  (`fx, fz, spin`), final tilt (`rx, rz`), sink `yb`, height scale `sy`, roughness, linear colour.
+  (`fx, fz, spin`), final tilt (`rx, rz`), sink `yb`, height scale `sy`, roughness, linear colour,
+  and a facet gain (gold only: the top face is shaded as if tilted further along `rx, rz`).
+- Two index lists over the same vertices: the full slab, and a far-view one without the bevel's
+  middle rings, swapped by `setDetail(pxPerUnit)` once the bevel is under ~1 px on screen.
 - The **drop runs in the vertex shader** (`onBeforeCompile` on `MeshStandardMaterial`), with
   the prototype's exact pose: for `p = (uSim − t0)/D`: before 0 the piece is collapsed (no
   fragments); `p < 0.8`: `q = p/0.8, y = DROP(1−q²), f = 1−q`; else `q = (p−0.8)/0.2,
@@ -189,6 +192,9 @@ interchangeable:
 
 ```js
 { count, T_END, update(sim), startedAt(sim), landedAt(sim), stageAt(sim), rLaidAt(sim), reset() }
+// optional (the zellige pieces have them, the legacy tiles do not):
+//   rCoveredAt(sim)      radius inside which every piece has landed (the bed hides its sinopia there)
+//   setDetail(pxPerUnit) full or far-view slabs
 ```
 
 ## 5. three r186 porting notes (prototype was r128)
@@ -218,5 +224,9 @@ interchangeable:
 - Headless Chrome on the GPU: `scripts/lib/browser.mjs` (`launch()`), and
   `node scripts/shot.mjs <url> <out.png> [--w --h --wait --eval --evalWait]`.
 - `window.__seek(t)` jumps the simulation clock (dev aid only; real-input checks use the HUD
-  buttons and pointer events).
+  buttons and pointer events). `window.__pixelRatio()` reads the pixel ratio the performance
+  guard (`scene/governor.js`) is using.
+- Gold vs glaze in a rendered frame: scripts/verify-app.mjs `glint` draws a mask frame with the
+  same camera through three's devtools hook (no change to src/), since honey ochre and gold are
+  too close in colour to separate by hue.
 - Measure rendered output (screenshots, pixel stats, fps), not internal state.

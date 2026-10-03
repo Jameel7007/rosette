@@ -4,10 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Rosette in Tesserae</title>
-<meta name="description" content="An Islamic mosaic rosette laid tile by tile in the browser.">
+<meta name="description" content="A zellige rosette laid piece by piece in the browser.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-10 -10 20 20'%3E%3Ccircle r='10' fill='%231a3473'/%3E%3Cg fill='%23d3a64e'%3E%3Crect x='-5.5' y='-5.5' width='11' height='11'/%3E%3Crect x='-5.5' y='-5.5' width='11' height='11' transform='rotate(45)'/%3E%3C/g%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Spline+Sans+Mono:wght@400;500&display=swap">
+<!-- The web fonts must not hold the page back: a normal stylesheet link is render-blocking, and
+     the app's script waits for it, so a slow or blocked fonts.googleapis.com delayed the whole
+     piece (by 3 s when it was 3 s slow). As media="print" it loads in the background without
+     blocking; onload switches it on, and display=swap shows the fallback fonts meanwhile. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Spline+Sans+Mono:wght@400;500&display=swap" media="print" onload="this.media='all'">
 <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
@@ -16,13 +20,13 @@
   <div class="top">
     <div class="pill">
       <div class="name">Rosette in Tesserae</div>
-      <div class="sub">Eight-fold, laid from the center point</div>
+      <div class="sub" id="sub">Zellige, laid from the center point</div>
     </div>
   </div>
   <div class="bottom">
     <div class="pill count">
       <div class="stage" id="stage">Preparing the bed</div>
-      <div class="num"><span id="n">0</span><small id="of">of 0 tesserae</small></div>
+      <div class="num"><span id="n">0</span><small id="of">tesserae</small></div>
       <div class="bar"><i id="bar"></i></div>
     </div>
     <div class="pill">

@@ -3,7 +3,13 @@
 export const PANEL = { HALF: 46, BORDER: 52, EXT: 114 };
 
 export const PIECE = {
-  GROUT: 0.14,   // gap between neighbouring pieces (each inset by GROUT/2)
+  // Gap between neighbouring pieces (each inset by GROUT/2). Was 0.14: overhead, every black
+  // strap then sat in a wide cream joint and the strapwork read as a chain of separate bars;
+  // Fez panels have hairline joints, so the straps read as unbroken ribbons. 0.12 (an inset of
+  // 0.06, the low end of the brief's 0.06-0.08) with the straps' smaller bevel (scene/pieces.js
+  // BEVEL_STRAP) was chosen from rendered before/after (0.14, 0.12, 0.10); the piece count
+  // stays 10,209.
+  GROUT: 0.12,
   BEVEL: 0.07,   // rounded bevel on the top edge
   HEIGHT: 0.38,  // slab thickness before per-piece scale
   WOBBLE: 0.03,  // max vertex jitter: hand-chipped, not laser-cut

@@ -2,8 +2,15 @@
 // around it and the floor it sits on.
 //
 // The bed's colour and relief are painted on 2D canvases: a colour map (noise, soft blotches,
-// aggregate grains, then the sinopia lines) and a matching grey bump map so the grains catch
-// the light. The sinopia is painted on the colour map itself, so tiles cover it as they land.
+// aggregate grains) and a matching grey bump map so the grains catch the light.
+//
+// The sinopia (the setter's red guide lines) has two homes:
+//   - the prototype (?legacy=1) paints it onto the colour map itself, as the prototype did;
+//   - the zellige build paints it into its own layer (paintSinopia), which the bed's shader
+//     fades out wherever every piece has landed (setCovered). Zellige pieces are cut along the
+//     very construction lines the setter drew, so the joints between them lie ON the red lines:
+//     painted into the mortar, the red showed through every grout joint of the finished panel
+//     and outlined its outer edge. A real setter's lines are covered by the setting bed.
 import * as THREE from 'three';
 import { PANEL } from '../config.js';
 import { rawHex } from './renderer.js';
@@ -25,6 +32,9 @@ export const BED = {
   // covers its sides and the floor its bottom.
   UNDER_TOP: -0.25,
   UNDER_BOTTOM: -0.61,
+  // The sinopia layer fades out over this many units inside the covered radius, so the edge of
+  // the hidden area is soft (and lies under pieces that have already landed)
+  SINOPIA_FADE: 1.5,
 };
 
 /**
@@ -136,7 +146,7 @@ function mortarTextures(renderer, rand, sinopia) {
   map.anisotropy = renderer.capabilities.getMaxAnisotropy();
   const bump = new THREE.CanvasTexture(bv);  // data, not colour: stays in NoColorSpace
   bump.anisotropy = map.anisotropy;
-  return { map, bump };
+  return { map, bump, g };
 }
 
 /**
@@ -170,11 +180,63 @@ const BUMP_R128 = /* glsl */`
 #endif
 `;
 
-function useR128Bump(material) {
+/**
+ * The sinopia layer: a one-channel texture (line opacity, on the bed's own UVs) mixed over the
+ * mortar colour in sRGB, exactly as the canvas would have composited it, and faded out inside
+ * uCovered (the radius within which every piece has landed). r is measured from the bed's UVs.
+ */
+const SINOPIA_PARS = /* glsl */`
+uniform sampler2D uSinopia;
+uniform vec3 uSinopiaColor;   // sRGB 0..1
+uniform float uCovered;       // world units; huge once the panel is complete
+uniform float uSinopiaFade;
+uniform float uBedSize;
+`;
+const SINOPIA_MIX = /* glsl */`
+#ifdef USE_MAP
+	{
+		float r = length( ( vMapUv - 0.5 ) * uBedSize );
+		float a = texture2D( uSinopia, vMapUv ).r * smoothstep( uCovered - uSinopiaFade, uCovered, r );
+		vec3 srgb = sRGBTransferOETF( vec4( diffuseColor.rgb, 1.0 ) ).rgb;
+		diffuseColor.rgb = sRGBTransferEOTF( vec4( mix( srgb, uSinopiaColor, a ), 1.0 ) ).rgb;
+	}
+#endif
+`;
+
+function patchBedShader(material, uniforms) {
   material.onBeforeCompile = shader => {
-    shader.fragmentShader = shader.fragmentShader.replace('#include <bumpmap_pars_fragment>', BUMP_R128);
+    Object.assign(shader.uniforms, uniforms);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <bumpmap_pars_fragment>', BUMP_R128 + SINOPIA_PARS)
+      .replace('#include <map_fragment>', '#include <map_fragment>\n' + SINOPIA_MIX);
   };
-  material.customProgramCacheKey = () => 'bump-r128';
+  material.customProgramCacheKey = () => 'bed-r128-sinopia';
+}
+
+/**
+ * Draws a sinopia spec into a one-channel texture: on a transparent canvas, in white at each
+ * line's opacity, then the canvas's alpha channel is kept (lines in one path do not build up,
+ * exactly as on the colour map).
+ */
+function sinopiaLayer(spec, size, ext) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = size;
+  const g = cv.getContext('2d', { willReadFrequently: true });
+  drawSinopia(g, { ...spec, color: [255, 255, 255] }, { size, ext });
+  const rgba = g.getImageData(0, 0, size, size).data;
+  // Texture rows run bottom-up, canvas rows top-down: copy row y of the canvas to row
+  // size-1-y, so the layer lines up with the colour map (a CanvasTexture, flipped on upload)
+  const alpha = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const src = y * size * 4 + 3, dst = (size - 1 - y) * size;
+    for (let x = 0; x < size; x++) alpha[dst + x] = rgba[src + 4 * x];
+  }
+  const tex = new THREE.DataTexture(alpha, size, size, THREE.RedFormat, THREE.UnsignedByteType);
+  tex.unpackAlignment = 1;
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
 }
 
 /** The outer floor's texture: plain grey-brown noise, tiled. Draws after the bed (rand order). */
@@ -202,7 +264,8 @@ function floorTexture(rand) {
  * @param scene  THREE.Scene
  * @param ctx    { renderer, envMap, rand, sinopia }
  *               rand: random stream, consumed bed first, then floor;
- *               sinopia: a drawSinopia spec (null for a bare bed)
+ *               sinopia: a drawSinopia spec, or null for a bare bed (paint one later with
+ *               paintSinopia)
  */
 export function createBed(scene, { renderer, envMap, rand, sinopia }) {
   const disposables = [];
@@ -213,7 +276,18 @@ export function createBed(scene, { renderer, envMap, rand, sinopia }) {
     map: mt.map, bumpMap: mt.bump, bumpScale: BED.BUMP_SCALE,
     roughness: 0.95, metalness: 0, envMap, envMapIntensity: 0.35,
   }), mt.map, mt.bump);
-  useR128Bump(bedMat);
+  // The sinopia layer starts empty (a 1×1 transparent texel) until paintSinopia
+  const empty = new THREE.DataTexture(new Uint8Array([0]), 1, 1, THREE.RedFormat, THREE.UnsignedByteType);
+  empty.needsUpdate = true;
+  const bedUniforms = {
+    uSinopia: { value: empty },
+    uSinopiaColor: { value: new THREE.Vector3(160 / 255, 62 / 255, 40 / 255) },
+    uCovered: { value: 0 },
+    uSinopiaFade: { value: BED.SINOPIA_FADE },
+    uBedSize: { value: EXT },
+  };
+  patchBedShader(bedMat, bedUniforms);
+  keep(empty);
   const bed = new THREE.Mesh(keep(new THREE.PlaneGeometry(EXT, EXT)), bedMat);
   bed.rotation.x = -Math.PI / 2;   // plane x,y → world x,-z: canvas row 0 lands at z = -EXT/2
   bed.receiveShadow = true;
@@ -256,6 +330,22 @@ export function createBed(scene, { renderer, envMap, rand, sinopia }) {
 
   return {
     bed, floor, curb, under,
+    /**
+     * Paints a sinopia spec onto the bed that is already on screen, in its own fading layer.
+     * The zellige build paints the bare mortar first (so the first frame comes quickly) and
+     * draws the underdrawing once the pattern is composed, the way a setter marks out a bed
+     * before laying. The bump map is untouched (the lines are pigment, not relief).
+     */
+    paintSinopia(spec) {
+      const [r, g, b] = spec.color ?? [160, 62, 40];
+      bedUniforms.uSinopiaColor.value.set(r / 255, g / 255, b / 255);
+      bedUniforms.uSinopia.value = keep(sinopiaLayer(spec, BED.TEX, EXT));
+    },
+    /**
+     * The radius (world units) inside which every piece has landed: the sinopia layer is
+     * hidden there. One uniform write per frame. Infinity (all laid) hides all of it.
+     */
+    setCovered(r) { bedUniforms.uCovered.value = Math.min(r, 1e4); },
     dispose() {
       [bed, floor, ...curb, under].forEach(m => scene.remove(m));
       disposables.forEach(x => x.dispose());

@@ -16,6 +16,15 @@
 //
 // Normals are smooth along that profile, and smooth around gentle corners (a wobbled edge or
 // a polygonal arc), but split at sharp corners (turn > HARD_TURN_DEG) so star points stay crisp.
+//
+// Two index lists share the same vertices: the full slab, and a far-view one (level of detail)
+// that leaves out the bevel's middle rings: the top cap's edge joins the bottom of the bevel
+// (where the normal already faces sideways) in one band, and the side wall stays as it is.
+// Seen from far away the bevel is under a pixel wide, but with 4× multisampling every thin
+// band along an edge still costs its own shading pass on that edge's pixels, which made the
+// bevels the biggest GPU cost of the finished view. scene/pieces.js switches lists.
+// (Dropping the side wall too, one band from the cap straight to the foot, measured faster
+// still but visibly flattened every piece's edge, even at half a pixel of bevel.)
 
 import { ShapeUtils, Vector2 } from 'three';
 
@@ -181,9 +190,10 @@ export function planSlab(poly, { bevel, segments = SLAB.BEVEL_SEGMENTS, hardTurn
   const ringSize = n + hardCount;                    // rings with split normals at hard corners
   const vertexCount = 2 * n + (segments + 1) * ringSize;
   const indexCount = 3 * (topTris.length / 3 + bottomTris.length / 3 + 2 * (segments + 1) * n);
+  const lodIndexCount = 3 * (topTris.length / 3 + bottomTris.length / 3 + 2 * 2 * n);   // two bands, not segments + 1
 
-  return { pts, top, n, hard, hardCount, mx, my, dx, dy, sx, sy, scale, convex,
-    topTris, bottomTris, vertexCount, indexCount };
+  return { pts, top, n, hard, hardCount, mx, my, dx, dy, sx, sy, bevel, scale, convex,
+    topTris, bottomTris, vertexCount, indexCount, lodIndexCount };
 }
 
 /** The inset outline q is usable if no edge flipped, it is simple, and it lies inside pts. */
@@ -229,9 +239,9 @@ function triangulate(pts, convex) {
  * Write a planned slab into the shared buffers at out.v (vertex cursor) / out.i (index cursor).
  * Plane point (x, y) becomes world (x, height, y).
  */
-export function writeSlab(plan, out, pieceId, { height, bevel, segments = SLAB.BEVEL_SEGMENTS }) {
+export function writeSlab(plan, out, pieceId, { height, segments = SLAB.BEVEL_SEGMENTS }) {
   const { pts, top, n, hard, mx, my, dy, dx, sx, sy } = plan;
-  const b = bevel * plan.scale;                      // the bevel this piece actually gets
+  const b = plan.bevel * plan.scale;                 // the bevel this piece actually gets
   const P = out.position, N = out.normal, ID = out.pieceId, I = out.index;
   const base = out.v;
   let v = out.v, k = out.i;
@@ -283,31 +293,51 @@ export function writeSlab(plan, out, pieceId, { height, bevel, segments = SLAB.B
   const edgeStart = (ring, i) => ring + off[i] + hard[i];
   const edgeEnd = (ring, i) => ring + (i + 1 < n ? off[i + 1] : 0);
 
-  // Top cap: CCW in the (x, z) plane faces −y, so flip each triangle to face up.
-  const tt = plan.topTris;
-  for (let t = 0; t < tt.length; t += 3) {
-    I[k++] = ring0 + tt[t]; I[k++] = ring0 + tt[t + 2]; I[k++] = ring0 + tt[t + 1];
-  }
-
-  // Bands of quads down the profile: ring0 → ring1 → … → foot. Upper (U) and lower (L)
-  // vertices of edge i; the two triangles (L_i, U_i+1, L_i+1) and (L_i, U_i, U_i+1) face out.
-  const quad = (Ui, Ui1, Li, Li1) => {
-    I[k++] = Li; I[k++] = Ui1; I[k++] = Li1;
-    I[k++] = Li; I[k++] = Ui; I[k++] = Ui1;
+  // Index writers for one list: `dst` is the array, the cursor is kept in `c.k`.
+  const caps = (dst, c) => {
+    // Top cap: CCW in the (x, z) plane faces −y, so flip each triangle to face up.
+    const tt = plan.topTris;
+    for (let t = 0; t < tt.length; t += 3) {
+      dst[c.k++] = ring0 + tt[t]; dst[c.k++] = ring0 + tt[t + 2]; dst[c.k++] = ring0 + tt[t + 1];
+    }
+    // Bottom cap: CCW in the plane already faces −y.
+    const bt = plan.bottomTris;
+    for (let t = 0; t < bt.length; t += 3) {
+      dst[c.k++] = ringBottom + bt[t]; dst[c.k++] = ringBottom + bt[t + 1]; dst[c.k++] = ringBottom + bt[t + 2];
+    }
   };
+  // Upper (U) and lower (L) vertices of edge i; the two triangles (L_i, U_i+1, L_i+1) and
+  // (L_i, U_i, U_i+1) face out.
+  const quad = (dst, c, Ui, Ui1, Li, Li1) => {
+    dst[c.k++] = Li; dst[c.k++] = Ui1; dst[c.k++] = Li1;
+    dst[c.k++] = Li; dst[c.k++] = Ui; dst[c.k++] = Ui1;
+  };
+
+  // Full slab: bands of quads down the profile, ring0 → ring1 → … → foot.
+  const full = { k };
+  caps(I, full);
   for (let i = 0; i < n; i++) {
     const i1 = (i + 1) % n;
-    quad(ring0 + i, ring0 + i1, edgeStart(ringStarts[0], i), edgeEnd(ringStarts[0], i));
+    quad(I, full, ring0 + i, ring0 + i1, edgeStart(ringStarts[0], i), edgeEnd(ringStarts[0], i));
     for (let r = 0; r + 1 < ringStarts.length; r++) {
-      quad(edgeStart(ringStarts[r], i), edgeEnd(ringStarts[r], i),
+      quad(I, full, edgeStart(ringStarts[r], i), edgeEnd(ringStarts[r], i),
            edgeStart(ringStarts[r + 1], i), edgeEnd(ringStarts[r + 1], i));
     }
   }
+  k = full.k;
 
-  // Bottom cap: CCW in the plane already faces −y.
-  const bt = plan.bottomTris;
-  for (let t = 0; t < bt.length; t += 3) {
-    I[k++] = ringBottom + bt[t]; I[k++] = ringBottom + bt[t + 1]; I[k++] = ringBottom + bt[t + 2];
+  // Far view: the caps, one band from the top cap's edge to the bevel's last ring (facing
+  // sideways), and the side wall from there to the foot.
+  if (out.lod) {
+    const lod = { k: out.li };
+    const side = ringStarts[segments - 1], foot = ringStarts[segments];
+    caps(out.lod, lod);
+    for (let i = 0; i < n; i++) {
+      quad(out.lod, lod, ring0 + i, ring0 + (i + 1) % n, edgeStart(side, i), edgeEnd(side, i));
+      quad(out.lod, lod, edgeStart(side, i), edgeEnd(side, i), edgeStart(foot, i), edgeEnd(foot, i));
+    }
+    if (lod.k - out.li !== plan.lodIndexCount) throw new Error(`slab LOD size mismatch: ${lod.k - out.li}/${plan.lodIndexCount}`);
+    out.li = lod.k;
   }
 
   if (v - base !== plan.vertexCount || k - out.i !== plan.indexCount) {
@@ -322,23 +352,27 @@ export function writeSlab(plan, out, pieceId, { height, bevel, segments = SLAB.B
 /**
  * Build slabs for many pieces into one set of buffers.
  *
- * @param {Array<{poly:number[][], id:number, pivot?:number[]}>} items  id → `pieceId` attribute
+ * @param {Array<{poly:number[][], id:number, pivot?:number[], bevel?:number}>} items  id → `pieceId`
+ *   attribute; `bevel` overrides opts.bevel for that piece
  * @param {{height:number, bevel:number, segments?:number}} opts
  * @returns {{ position: Float32Array, normal: Float32Array, pieceId: Float32Array, index: Uint32Array,
- *   vertices:number, triangles:number, pieces:number, skipped:number[], reducedBevel:number,
- *   maxReach:number }}
+ *   lodIndex: Uint32Array, vertices:number, triangles:number, lodTriangles:number, pieces:number,
+ *   skipped:number[], reducedBevel:number, maxReach:number }}
+ *   lodIndex: the far-view triangles (no bevel rings) over the same vertices.
  *   maxReach: largest distance from a piece's pivot (x, 0, y) to any of its vertices, for bounds.
  */
 export function buildSlabs(items, opts) {
   const plans = new Array(items.length);
-  let vertices = 0, indices = 0, reducedBevel = 0;
+  let vertices = 0, indices = 0, lodIndices = 0, reducedBevel = 0;
   const skipped = [];
   for (let p = 0; p < items.length; p++) {
-    const plan = planSlab(items[p].poly, opts);
+    // An item may ask for its own bevel (e.g. the thin black straps get a smaller one)
+    const plan = planSlab(items[p].poly, items[p].bevel ? { ...opts, bevel: items[p].bevel } : opts);
     plans[p] = plan;
     if (!plan) { skipped.push(items[p].id); continue; }
     vertices += plan.vertexCount;
     indices += plan.indexCount;
+    lodIndices += plan.lodIndexCount;
     if (plan.scale < 1) reducedBevel++;
   }
 
@@ -347,7 +381,8 @@ export function buildSlabs(items, opts) {
     normal: new Float32Array(vertices * 3),
     pieceId: new Float32Array(vertices),
     index: new Uint32Array(indices),
-    v: 0, i: 0,
+    lod: new Uint32Array(lodIndices),   // the far-view index list (see the top of this file)
+    v: 0, i: 0, li: 0,
   };
   let maxReach = 0;
   for (let p = 0; p < items.length; p++) {
@@ -359,7 +394,8 @@ export function buildSlabs(items, opts) {
   }
 
   return {
-    position: out.position, normal: out.normal, pieceId: out.pieceId, index: out.index,
-    vertices, triangles: indices / 3, pieces: items.length - skipped.length, skipped, reducedBevel, maxReach,
+    position: out.position, normal: out.normal, pieceId: out.pieceId, index: out.index, lodIndex: out.lod,
+    vertices, triangles: indices / 3, lodTriangles: lodIndices / 3,
+    pieces: items.length - skipped.length, skipped, reducedBevel, maxReach,
   };
 }

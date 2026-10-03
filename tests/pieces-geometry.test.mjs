@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import polygonClipping from 'polygon-clipping';
-import { planSlab, buildSlabs, isSimplePolygon, signedArea, cleanPolygon } from '../src/scene/extrude.js';
+import { planSlab, buildSlabs, isSimplePolygon, signedArea, cleanPolygon, SLAB } from '../src/scene/extrude.js';
 
 const H = 0.38, BEVEL = 0.07;
 const OPTS = { height: H, bevel: BEVEL };
@@ -197,11 +197,11 @@ test('12,000 mixed pieces build quickly into one set of buffers', () => {
 // ---------------------------------------------------------------- createPieces (no GPU needed)
 // three.js builds materials, textures and geometry fine in Node; only drawing needs WebGL.
 import * as THREE from 'three';
-import { createPieces, createZelligeTiles, makeTileSystem, glazeColor, PIECE_LOOK } from '../src/scene/pieces.js';
+import { createPieces, createZelligeTiles, makeTileSystem, glazeColor, PIECE_LOOK, DETAIL } from '../src/scene/pieces.js';
 import { makeSchedule } from '../src/anim/schedule.js';
 import { stream, mulberry } from '../src/util/rand.js';
 import { PAL, VARIATION } from '../src/pattern/palette.js';
-import { TIMING } from '../src/config.js';
+import { TIMING, PIECE } from '../src/config.js';
 
 function fieldOfPieces(n) {
   const keys = ['W', 'K', 'B', 'T', 'G', 'O', 'R', 'A'];
@@ -327,4 +327,44 @@ test('the tile system: one uniform per frame, schedule queries, reset', () => {
   sys.reset();
   assert.equal(pieces.uniforms.uSim.value, 0);
   pieces.dispose();
+});
+
+// ---------------------------------------------------------------- far-view slabs, facets, draw order
+
+test('far-view index list: same vertices, closed surface, caps kept, no bevel rings', () => {
+  for (const [name, poly] of [['star', star8()], ['strap', strap], ['hexagon', hexagon], ['clipped star', clippedStar]]) {
+    const mesh = buildOne(poly);
+    const far = { ...mesh, index: mesh.lodIndex };
+    checkMesh(`${name} (far view)`, far, { strictNormals: false });   // one band from up-normals to side-normals, then the wall
+    assert.ok(mesh.lodTriangles < mesh.triangles * 0.85, `${name}: ${mesh.lodTriangles} vs ${mesh.triangles} triangles`);
+    // The far list skips the bevel's middle rings: only the top cap, the bevel's last ring
+    // (facing sideways), the foot ring and the bottom cap
+    const used = new Set(mesh.lodIndex);
+    const plan = planSlab(poly, { bevel: BEVEL });
+    const ringSize = plan.n + plan.hardCount;
+    // writeSlab's vertex order: top cap ring (n), bevel rings 1..segments, foot ring, bottom ring
+    const bevelRings = [plan.n, plan.n + (SLAB.BEVEL_SEGMENTS - 1) * ringSize];
+    for (let v = bevelRings[0]; v < bevelRings[1]; v++) assert.ok(!used.has(v), `${name}: far view uses bevel vertex ${v}`);
+  }
+});
+
+test('createPieces: gold carries a facet gain, glaze none; pieces draw before the bed', () => {
+  const schedule = makeSchedule(fieldOfPieces(64), TIMING);
+  const built = createPieces(schedule, { rand: stream('pieces') });
+  const d = built.uniforms.uPieceData.value.image.data;
+  for (let i = 0; i < schedule.N; i++) {
+    assert.equal(d[i * 16 + 15], schedule.pieces[i].key === 'A' ? PIECE_LOOK.FACET_GOLD : 0);
+  }
+  for (const mesh of built.meshes) assert.ok(mesh.renderOrder < 0, 'pieces first: the bed under them is depth-rejected');
+  // setDetail swaps to the far-view geometry below ~a pixel of bevel, with hysteresis
+  const bevelPx = px => px / PIECE.BEVEL;
+  assert.equal(built.setDetail(bevelPx(2)), false);
+  const fullGeometry = built.meshes[0].geometry;
+  assert.equal(built.setDetail(bevelPx(DETAIL.FAR_BELOW_PX * 0.9)), true);
+  assert.notEqual(built.meshes[0].geometry, fullGeometry);
+  assert.equal(built.meshes[0].geometry.getAttribute('position'), fullGeometry.getAttribute('position'), 'vertices are shared');
+  assert.equal(built.setDetail(bevelPx((DETAIL.FAR_BELOW_PX + DETAIL.NEAR_ABOVE_PX) / 2)), true, 'stays far until clearly bigger');
+  assert.equal(built.setDetail(bevelPx(DETAIL.NEAR_ABOVE_PX * 1.1)), false);
+  assert.equal(built.meshes[0].geometry, fullGeometry);
+  built.dispose();
 });

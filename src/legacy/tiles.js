@@ -9,7 +9,7 @@
 // (the window [lo, hi) of the sorted list), so the cost stays small even at 10k tiles.
 import * as THREE from 'three';
 import { TIMING } from '../config.js';
-import { PAL } from '../pattern/palette.js';
+import { PROTOTYPE_PAL as PAL } from '../pattern/palette.js';   // the prototype's colours, frozen
 import { jitter } from '../util/rand.js';
 import { colorAt } from './pattern.js';
 

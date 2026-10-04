@@ -6,8 +6,12 @@ import { chromium } from 'playwright-core';
 
 const cache = `${homedir()}/Library/Caches/ms-playwright`;
 const found = existsSync(cache) && readdirSync(cache).filter(d => /^chromium-\d+$/.test(d)).sort().pop();
+// Order: CHROME_PATH, the Playwright cache's Chrome for Testing, then the installed Google Chrome
+// (the cache can be cleared by disk clean-up tools, which silently broke every script once).
+const systemChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 export const executablePath = process.env.CHROME_PATH
-  || (found && `${cache}/${found}/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`);
+  || (found && `${cache}/${found}/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`)
+  || (existsSync(systemChrome) ? systemChrome : undefined);
 
 export function launch(opts = {}) {
   return chromium.launch({

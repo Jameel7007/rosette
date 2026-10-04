@@ -105,7 +105,9 @@ test('build time in Node', t => {
   composePanel();
   const warm = performance.now() - t1;
   t.diagnostic(`cold ${coldMs.toFixed(0)} ms, warm ${warm.toFixed(0)} ms; steps ${JSON.stringify(stats.ms)}`);
-  assert.ok(Math.min(coldMs, warm) < 1500, `build takes ${Math.min(coldMs, warm).toFixed(0)} ms (over 1.5 s)`);
+  // GitHub's build machines are about 2.5x slower than the M2 Pro this budget was set on
+  const budget = process.env.CI ? 4000 : 1500;
+  assert.ok(Math.min(coldMs, warm) < budget, `build takes ${Math.min(coldMs, warm).toFixed(0)} ms (over ${budget} ms)`);
 });
 
 test('field: no clip sliver left, and every 4.8.8 square has its gold pin', () => {

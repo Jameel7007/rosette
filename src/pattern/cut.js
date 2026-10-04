@@ -250,9 +250,40 @@ export function splitStar(poly, centre, mode) {
     const wedge = [centre, ray[k]];
     for (let s = 1; s < steps; s++) wedge.push(add2(centre, polar(R, a0 + (TAU * k) / count + (span * s) / steps)));
     wedge.push(ray[k + 1]);
-    out.push(...flattenHoles(pc.intersection([[poly]], [[wedge]])));
+    out.push(...clipToWedge(poly, wedge));
   }
   return out.filter(p => area(p) > 0);
+}
+
+/**
+ * The part of `poly` inside a convex `wedge`. Sutherland–Hodgman clipping against each wedge
+ * edge is exact and needs no boolean library; it is the right tool here because a star is
+ * star-shaped about its centre, so its slice of a wedge from that centre is one piece.
+ * polygon-clipping is only the fallback (a polygon that is not star-shaped about the centre
+ * can leave Sutherland–Hodgman with zero-width bridges): its sweep line can throw "Unable to
+ * complete output ring" when the wedge apex sits exactly on a vertex, and whether it does
+ * depends on the last bit of Math.sin/cos, which differs between ARM and Intel machines.
+ */
+function clipToWedge(poly, wedge) {
+  let out = poly;
+  for (let i = 0; i < wedge.length && out.length; i++) {
+    const a = wedge[i], b = wedge[(i + 1) % wedge.length];
+    const side = p => (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);   // > 0: inside (CCW wedge)
+    const next = [];
+    for (let j = 0; j < out.length; j++) {
+      const p = out[j], q = out[(j + 1) % out.length], sp = side(p), sq = side(q);
+      if (sp >= 0) next.push(p);
+      if ((sp > 0 && sq < 0) || (sp < 0 && sq > 0)) {
+        const t = sp / (sp - sq);
+        next.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+      }
+    }
+    out = next;
+  }
+  const piece = out.length >= 3 ? ensureCCW(dedupe(out)) : null;
+  if (!piece || piece.length < 3) return [];
+  if (isSimple(piece)) return [piece];
+  return flattenHoles(pc.intersection([[poly]], [[wedge]]));   // not star-shaped: let the library handle it
 }
 
 const add2 = (a, b) => [a[0] + b[0], a[1] + b[1]];

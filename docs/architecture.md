@@ -588,6 +588,27 @@ peak flash is about two thirds of what it was, but the glaze wash is about 11 ti
 gold is now the thing that lights up. At the full view it reads as a sparkle along the ring, the
 border and the pins, not one big flash.
 
+**What the owner saw, and the fix (October 2026).** Pressed in a real Chrome, Sweep light looked
+like it did nothing: measured at 1280×800 on the finished view, the panel dimmed by about 9 % and
+the gold did not visibly flash at all (a gold piece is ~10 pixels there, and its facet mirrors the
+sun for an instant). The button gave no sign either. So the sweep now also changes the light, the
+way evening light crosses a courtyard (`MOOD` and `sweepMood` in `light.js`, applied in `main.js`):
+
+- the room's light (the sky fill and every material's reflections) dims to 42 % at the middle of
+  the sweep, the background to 72 %, so the panel is lit mostly by the low sun;
+- the sun warms toward a golden-hour colour and gains 25 %, so raking light and long shadows read;
+- each gold piece flashes as the sun passes its side of the panel: a small shader term adds the
+  gold's own colour toward white on the piece's top face (`lookEmissiveFragment` in
+  `shaders/drop.js`), so a wave of glints runs round the border, the medallion's ring and the pins;
+- all of it follows sin² of the sweep's progress, so it eases in and out and the picture at rest is
+  exactly the one without a sweep (tests in `tests/sweep-mood.test.mjs`);
+- the button turns gold and reads "Sweeping…" while a sweep runs, the automatic one included.
+
+Measured the same way: the panel's mean brightness now dips from 141 to about 105 (−26 %) and
+comes back, with the warm shift and the glint wave on top. The glint is deliberately not a strict
+mirror reflection: at this scale an exact one is invisible, and an added flash is the honest way to
+show what a real panel does when you walk past it.
+
 ### 4.9 The bed and the underdrawing that disappears (`src/scene/bed.js`)
 
 The mortar is painted on a 2048-pixel canvas (noise, blotches, aggregate grains), with a matching

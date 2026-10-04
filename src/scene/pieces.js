@@ -45,6 +45,8 @@ export const PIECE_LOOK = {
   // turned ~40% of it into a lighter rounded edge, so overhead the straps read as grey-edged
   // bars. Half the bevel keeps them black and continuous (rendered before/after, config.js GROUT).
   BEVEL_STRAP: 0.035,
+  GLINT_WIDTH: 0.30,          // radians of sun azimuth each gold piece's sweep flash lasts (≈0.8 s mid-sweep)
+  GLINT_GAIN: 7.0,            // flash brightness (HDR, before tone mapping); anim/light.js MOOD has the why
   RIPPLE: 0.05,               // glaze ripple slope; 0 = perfectly flat glaze
   RIPPLE_FREQ: 1.25,          // ripple cycles per unit (lowest octave)
 };
@@ -165,6 +167,10 @@ export function createPieces(schedule, { envMap = null, rand = stream('pieces'),
     uDropHeight: { value: dropHeight },
     uRipple: { value: look.RIPPLE },
     uRippleFreq: { value: look.RIPPLE_FREQ },
+    uGlint: { value: 0 },
+    uSunAz: { value: 0 },
+    uGlintWidth: { value: look.GLINT_WIDTH },
+    uGlintGain: { value: look.GLINT_GAIN },
   };
 
   const patchStandard = material => {
@@ -181,10 +187,11 @@ export function createPieces(schedule, { envMap = null, rand = stream('pieces'),
       fs = inject(fs, '#include <color_fragment>', '#include <color_fragment>\n' + drop.lookColorFragment);
       fs = inject(fs, '#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n' + drop.lookRoughnessFragment);
       fs = inject(fs, '#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + drop.lookNormalFragment);
+      fs = inject(fs, '#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n' + drop.lookEmissiveFragment);
       shader.fragmentShader = fs;
     };
     // Glaze and gold differ only in uniforms, so they share one compiled program.
-    material.customProgramCacheKey = () => 'rosette-pieces-standard-1';
+    material.customProgramCacheKey = () => 'rosette-pieces-standard-2';
     return material;
   };
 
@@ -273,6 +280,8 @@ export function createPieces(schedule, { envMap = null, rand = stream('pieces'),
     group,
     /** The whole per-frame cost: one uniform write. */
     setSim(sim) { uniforms.uSim.value = sim; },
+    /** The light sweep's gold glint (anim/light.js MOOD): two uniform writes. */
+    setGlint(glint, sunAz) { uniforms.uGlint.value = glint; uniforms.uSunAz.value = sunAz; },
     /**
      * Chooses the full or the far-view slabs from how big one world unit is on screen (device
      * pixels per unit at the panel's centre). O(1): it swaps an index buffer, at most once per
@@ -343,6 +352,7 @@ export function makeTileSystem(schedule, pieces) {
     rLaidAt: schedule.rLaidAt,
     rCoveredAt: schedule.rCoveredAt,   // radius inside which everything has landed (the bed hides its underdrawing there)
     setDetail: pieces.setDetail,       // full or far-view slabs (see DETAIL)
+    setGlint: pieces.setGlint,         // the light sweep's gold glint
     // All piece state is a function of sim, so there is nothing to clear: back to "none started".
     reset() { pieces.setSim(0); },
   };

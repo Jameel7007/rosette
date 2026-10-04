@@ -94,8 +94,20 @@ export function createHud(handlers) {
   };
 
   let lastLanded = -1;
+  let sweeping = false;
 
   return {
+    /**
+     * Lights the Sweep light button (gold, "Sweeping…") while a sweep runs, the automatic one
+     * after the last piece included, so pressing it visibly does something at once.
+     */
+    setSweeping(on) {
+      if (on === sweeping) return;
+      sweeping = on;
+      $('sweep').setAttribute('aria-pressed', String(on));
+      $('sweep').textContent = on ? 'Sweeping…' : 'Sweep light';
+    },
+
     /** "of 10,209 tesserae" */
     setTotal(total) { $('of').textContent = 'of ' + fmt.format(total) + ' tesserae'; },
 

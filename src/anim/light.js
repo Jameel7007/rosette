@@ -105,6 +105,50 @@ export const SUN = {
 /** The prototype's dip (≈ 26.6°): a sweep never takes the sun lower than this. */
 export const SWEEP_FLOOR = Math.atan(SUN.REST_SLOPE - SUN.SWEEP_DIP);
 
+/**
+ * What the sweep does to the light besides moving the sun. Moving the sun alone is nearly
+ * invisible from the finished view (measured: the panel dimmed ~9 % and no gold flashed, at
+ * 1280×800), because the room's fill light and reflections stay the same and a ten-pixel gold
+ * piece only mirrors the sun for an instant. So, like evening light crossing a courtyard:
+ *   - the room's light (sky fill and reflections) dims to FILL at the middle of the sweep, and
+ *     the background with it, a little less (BACKGROUND), so the panel is lit mostly by the sun;
+ *   - the sun warms toward a low golden-hour colour (WARM) and gains a little (SUN_GAIN), so
+ *     the raking light reads against the dimmed room;
+ *   - the gold catches the light in turn: each gold piece flashes as the sun passes its side of
+ *     the panel (scene/pieces.js glint), a wave of glints that travels round with the sun.
+ * All of it follows sin²(πp) of the sweep's progress p: zero slope at both ends, so it eases in
+ * and out with no step, and the picture at rest is exactly the one without a sweep.
+ */
+export const MOOD = {
+  FILL: 0.42,        // room light at the middle of the sweep, × its rest level
+  BACKGROUND: 0.72,  // background and fog at the middle, × their rest level
+  SUN_GAIN: 1.25,    // sun strength at the middle, × its rest level
+  WARM: 0xffb070,    // sun colour at the middle (rest: renderer.js's 0xfff0d6), digits as linear RGB
+  GLINT_POWER: 0.5,  // glint envelope = sin(πp)^this: broad, so flashes run for most of the sweep
+};
+
+/** The light at rest: what every sweep starts from and returns to. */
+export const MOOD_REST = Object.freeze({ fill: 1, background: 1, gain: 1, warmth: 0, glint: 0, sunAz: SUN.REST_ANGLE });
+
+/**
+ * The sweep's light for progress p (0 → 1) and the sun's azimuth then. Pure.
+ * @returns {{ fill, background, gain, warmth, glint, sunAz }} multipliers for the room light,
+ *   the background, the sun's strength; warmth 0..1 toward MOOD.WARM; glint 0..1 (the gold's
+ *   flash strength); sunAz the sun's azimuth (radians, atan2(z, x)), which the glint follows
+ */
+export function sweepMood(p, sunAz) {
+  if (!(p > 0 && p < 1)) return { ...MOOD_REST, sunAz };
+  const s = Math.sin(Math.PI * p), e = s * s;
+  return {
+    fill: 1 - (1 - MOOD.FILL) * e,
+    background: 1 - (1 - MOOD.BACKGROUND) * e,
+    gain: 1 + (MOOD.SUN_GAIN - 1) * e,
+    warmth: e,
+    glint: Math.pow(s, MOOD.GLINT_POWER),
+    sunAz,
+  };
+}
+
 /** The prototype's fixed shadow depth, kept for the ?legacy=1 reference build only. */
 const PROTOTYPE_SHADOW = { near: 1, far: 320, bias: -0.0006 };
 
@@ -152,12 +196,13 @@ function smoothDamp(x, v, target, smooth, dt) {
  * @param opts.prototypeShadow  true: keep the prototype's fixed near/far/bias (the legacy
  *   build, so it stays a faithful reference of the prototype's picture)
  */
-export function createLightRig(sun, { prototypeShadow = false } = {}) {
+export function createLightRig(sun, { prototypeShadow = false, mood: withMood = true } = {}) {
   let sweepStart = -1;   // clock time the current sweep starts; -1 = none
   let aim = null;        // the sweep's height behind the panel (radians), smoothed; null = not aimed yet
   let aimRate = 0;       // ... and how fast it is changing (radians per second)
   let last = 0;          // clock time of the previous update
   let elev = Math.atan(SUN.REST_SLOPE);   // the sun's current elevation (radians)
+  let mood = MOOD_REST;  // the sweep's light this frame (sweepMood); the ?legacy=1 build keeps the prototype's
 
   /**
    * Places the sun for wall-clock time `now` (seconds).
@@ -172,10 +217,12 @@ export function createLightRig(sun, { prototypeShadow = false } = {}) {
     last = now;
     let angle = SUN.REST_ANGLE;
     elev = Math.atan(SUN.REST_SLOPE);
+    let progress = -1;     // where the sweep is (0 → 1), or -1 at rest
     if (sweepStart >= 0 && now >= sweepStart) {
       const p = (now - sweepStart) / SUN.SWEEP_SECONDS;
       if (p >= 1) sweepStart = -1;
       else {
+        progress = p;
         const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;   // ease in-out quad
         angle += e * TAU;
         if (view) {
@@ -201,6 +248,7 @@ export function createLightRig(sun, { prototypeShadow = false } = {}) {
     const R = SUN.DISTANCE;
     sun.position.set(Math.cos(angle) * R * Math.cos(elev), Math.sin(elev) * R, Math.sin(angle) * R * Math.cos(elev));
     sun.target.position.set(0, 0, 0);
+    mood = withMood ? sweepMood(progress, angle) : MOOD_REST;
   }
 
   /**
@@ -248,7 +296,9 @@ export function createLightRig(sun, { prototypeShadow = false } = {}) {
       if (sweepStart >= 0 && last >= sweepStart) return;
       sweepStart = at; aim = null; aimRate = 0;
     },
-    cancel() { sweepStart = -1; },
+    cancel() { sweepStart = -1; mood = MOOD_REST; },
     get sweeping() { return sweepStart >= 0; },
+    /** The sweep's light this frame (see MOOD): main.js applies it to the room, sun and gold. */
+    get mood() { return mood; },
   };
 }

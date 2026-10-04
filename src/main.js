@@ -23,11 +23,11 @@
 // its own playback through the same step(), exactly 1/60 s per encoded frame, at the video's
 // size, then hands the page back exactly as it was (beginExport / endExport below).
 import { mulberry, stream, SEED } from './util/rand.js';
-import { createRenderer, pixelRatioCeiling } from './scene/renderer.js';
+import { createRenderer, pixelRatioCeiling, rawHex } from './scene/renderer.js';
 import { createGovernor } from './scene/governor.js';
 import { createBed } from './scene/bed.js';
 import { createCameraRig, portraitFactor } from './anim/camera.js';
-import { createLightRig } from './anim/light.js';
+import { createLightRig, MOOD } from './anim/light.js';
 import { createHud, createStageLabel } from './ui/hud.js';
 import { createExportPanel } from './ui/export-panel.js';
 import { createClicks } from './audio/clicks.js';
@@ -65,7 +65,29 @@ function boot() {
   const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Reduced motion: no slow automatic turn either, so the finished panel holds still
   const rig = createCameraRig(camera, canvas, { drift: !reduceMotion });
-  const light = createLightRig(sun, { prototypeShadow: LEGACY });
+  const light = createLightRig(sun, { prototypeShadow: LEGACY, mood: !LEGACY });
+
+  // The light sweep's mood (anim/light.js MOOD) scales these from their rest values each frame;
+  // the rest values are read once here, so the sweep can never drift the picture at rest.
+  const rest = {
+    hemi: stage.hemi.intensity,
+    sun: sun.intensity,
+    sunColor: sun.color.clone(),
+    warm: rawHex(MOOD.WARM),
+    background: scene.background.clone(),
+    fog: scene.fog.color.clone(),
+    env: [],   // { material, base }: every material that reflects the environment (start() fills it)
+  };
+  /** Puts one frame of the sweep's light on the room, the sun and the gold. */
+  function applyMood(m) {
+    stage.hemi.intensity = rest.hemi * m.fill;
+    for (const e of rest.env) e.material.envMapIntensity = e.base * m.fill;
+    scene.background.copy(rest.background).multiplyScalar(m.background);
+    scene.fog.color.copy(rest.fog).multiplyScalar(m.background);
+    sun.intensity = rest.sun * m.gain;
+    sun.color.copy(rest.sunColor).lerp(rest.warm, m.warmth);
+    tiles?.setGlint?.(m.glint, m.sunAz);
+  }
   const clicks = createClicks();
 
   let tiles = null;     // the tile system, once built
@@ -136,6 +158,14 @@ function boot() {
     pendingFinish = false;
     live.prevLanded = tiles.landedAt(live.sim);
     readyClock = live.clock;
+    // The materials the sweep dims (bed, curb, floor and both piece materials), with their rest strength
+    rest.env.length = 0;
+    const seen = new Set();
+    scene.traverse(o => {
+      for (const m of [o.material].flat()) {
+        if (m?.envMap && !seen.has(m)) { seen.add(m); rest.env.push({ material: m, base: m.envMapIntensity }); }
+      }
+    });
     shadowDirty = true;
     // Only the zellige build can be exported (its schedule drives the export's sound); the
     // prototype build (?legacy=1) hides the button instead of leaving it dimmed for ever
@@ -287,6 +317,8 @@ function boot() {
     // The sweep aims its high point at the viewer, just below the mirror height of the far
     // edge on screen (the legacy build keeps the prototype's sweep, which ignores the viewer)
     r.light.update(r.clock, LEGACY ? null : camera.position, r.rig.framing * r.rig.zoom);
+    applyMood(r.light.mood);
+    if (r === live) hud.setSweeping(live.light.sweeping);
     const boxMoved = r.light.fitShadow(r.rig.framing, r.rig.zoom);   // after update: the depth fit uses the sun's height
 
     // The shadow map only changes when a piece moves, the sun moves or the shadow box moves.
@@ -395,7 +427,7 @@ function boot() {
     tiles.setDetail?.(Infinity);
     run = {
       rig: createCameraRig(camera, canvas, { drift: true, input: false, fit: true }),
-      light: createLightRig(sun, { prototypeShadow: LEGACY }),
+      light: createLightRig(sun, { prototypeShadow: LEGACY, mood: !LEGACY }),
       sim: 0, clock: 0, speed,
       autoSweep: true,    // the video always ends with the sweep, even with reduced motion
       autoSwept: false,
@@ -423,6 +455,7 @@ function boot() {
     sun.shadow.camera.updateProjectionMatrix();
     sun.shadow.bias = saved.shadowBias;
     tiles.update(live.sim);
+    applyMood(live.light.mood);   // a cancelled export may have stopped mid-sweep: back to the live light
     shadowDirty = true;
   }
 

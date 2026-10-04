@@ -121,6 +121,8 @@ varying float vTopMask;     // 1 on the top cap, fading to 0 down the bevel
 varying vec3 vTanX;         // view-space directions of the piece's own x and z axes,
 varying vec3 vTanZ;         //   so the ripple stays glued to the piece while it tumbles
 varying vec2 vFacet;        // extra slope of the top face (gold facets), in the piece's x and z
+varying float vGold;        // 1 on gold pieces (they have a facet), 0 on glaze
+varying float vGlintPhase;  // the sun azimuth at which this gold piece flashes during a sweep
 `;
 
 /** Appended after <begin_vertex> in the standard material. */
@@ -134,6 +136,11 @@ export const lookVertex = /* glsl */ `
 		// its resting tilt (rx, rz). A tilt of rx about x leans the face toward +z, so its slope
 		// is (rz, -rx). Only the normal changes, not the slab (see PIECE_LOOK.FACET_GOLD).
 		vFacet = tint.a * vec2( look.y, - look.x );
+		// Glint phase: the piece's own direction from the panel's centre, scattered by up to
+		// ±0.45 rad with its seed, so the flashes run round with the sun as a loose wave, not a
+		// ruled line (the + 1e-5 keeps atan defined for the piece at the very centre)
+		vGold = step( 0.5, tint.a );
+		vGlintPhase = atan( piecePose.pivot.z, piecePose.pivot.x + 1e-5 ) + ( fract( look.w * 7.31 ) - 0.5 ) * 0.9;
 		vPieceRough = look.z;
 		vRippleUV = position.xz + vec2( 71.3, 37.9 ) * look.w;
 		vTopMask = smoothstep( 0.9, 0.98, normal.y );
@@ -148,6 +155,12 @@ export const lookVertex = /* glsl */ `
 export const lookParsFragment = /* glsl */ `
 uniform float uRipple;       // ripple slope (radians-ish); 0 turns it off
 uniform float uRippleFreq;   // ripple cycles per unit
+uniform float uGlint;        // the sweep's glint strength, 0 at rest (anim/light.js MOOD)
+uniform float uSunAz;        // the sun's azimuth (radians, atan2(z, x))
+uniform float uGlintWidth;   // how wide (radians of azimuth) each piece's flash is
+uniform float uGlintGain;    // how bright a flash is (HDR, before tone mapping)
+varying float vGold;
+varying float vGlintPhase;
 varying vec3 vPieceColor;
 varying float vPieceRough;
 varying vec2 vRippleUV;
@@ -216,6 +229,21 @@ vec2 rippleSlope( vec2 uv, float pixelsPerUnit ) {
 /** Appended after <color_fragment>: the piece's own glaze colour. */
 export const lookColorFragment = /* glsl */ `
 	diffuseColor.rgb *= vPieceColor;
+`;
+
+/**
+ * Appended after <emissivemap_fragment>: a gold piece flashes as the sweeping sun passes its
+ * side of the panel. Why add light rather than wait for a true mirror reflection: from the
+ * finished view a gold piece is ~10 pixels and its facet mirrors the sun for an instant, so a
+ * physically exact sweep showed almost no glint (anim/light.js MOOD). The flash is the gold's
+ * own colour toward white, on the top face, and it rises and falls smoothly with the sun.
+ */
+export const lookEmissiveFragment = /* glsl */ `
+	if ( vGold > 0.5 && uGlint > 0.0 ) {
+		float glintOff = abs( mod( uSunAz - vGlintPhase + PI, 2.0 * PI ) - PI );   // wrapped to 0..π
+		float flash = exp( - glintOff * glintOff / ( uGlintWidth * uGlintWidth ) );
+		totalEmissiveRadiance += mix( vPieceColor, vec3( 1.0 ), 0.5 ) * ( uGlint * uGlintGain * flash * vTopMask );
+	}
 `;
 
 /** Appended after <roughnessmap_fragment>: the piece's own roughness. */

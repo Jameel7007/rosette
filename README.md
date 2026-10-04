@@ -1,5 +1,9 @@
 # Rosette in Tesserae
 
+**Live: [jameel7007.github.io/rosette](https://jameel7007.github.io/rosette/)**
+
+![The finished panel seen from above](docs/readme/finished.jpg)
+
 A Moroccan **zellige** panel laid by hand, one piece at a time, in the browser. It opens on an
 extreme close-up of grainy mortar with the setter's red underdrawing. A single gold eight-pointed
 star drops into the centre. Then 10,209 pieces follow, ring by ring and faster and faster, while the
@@ -8,6 +12,8 @@ glints.
 
 Nothing on screen is a video or a photograph. The pattern is constructed with compass-and-straightedge
 geometry, cut into pieces the way a craftsman would cut glazed tile, and animated on the GPU.
+
+![The opening: the gold centre piece and the first lapis pieces falling onto the mortar](docs/readme/opening.jpg)
 
 ## What makes it zellige
 
